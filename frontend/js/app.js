@@ -592,15 +592,18 @@
         showToast('Git Push completed successfully!');
       } else if (state.activeJobLogs.includes('Git Push Failed') || state.activeJobLogs.includes('Push Rejected') || state.activeJobLogs.includes('💥 Error: /workspace is not a Git repository')) {
         showToast('Git Push failed. Check Build Console for details.', true);
-      } else if (state.activeJobLogs.includes('LOCAL DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('BUILD & PUSH JOB FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully built local image')) {
+      } else if (state.activeJobLogs.includes('DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('LOCAL DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('BUILD & PUSH JOB FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully built')) {
+        const buildTag = state.dockerTargetImageTagInput || state.dockerLocalTagInput || 'latest';
         state.lastLocalBuild = {
           ready: true,
           imageName: 'dockforge',
-          tag: state.dockerLocalTagInput || 'latest',
+          tag: buildTag,
           timestamp: new Date().toLocaleTimeString()
         };
         safeLocalStorageSet('dockforge_last_build', JSON.stringify(state.lastLocalBuild));
-        showToast(`Local Docker build ready (${state.lastLocalBuild.tag})!`);
+        showToast(`Docker image build completed (${buildTag})!`);
+      } else if (state.activeJobLogs.includes('DOCKER PUSH FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully pushed')) {
+        showToast('Docker image push completed successfully!');
       }
       loadJobs();
       render();
@@ -777,24 +780,11 @@
                 <span>Image Build</span>
               </button>
 
-              <button id="btn-push-docker" class="px-2.5 py-1.5 text-xs font-semibold ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm border border-indigo-500/30' : 'bg-indigo-600/85 hover:bg-indigo-600 text-white/90 border border-indigo-500/30'} rounded-lg flex items-center space-x-1.5 transition cursor-pointer" title="Push Docker Image to Registry">
-                <i class="fa-solid fa-rocket text-indigo-200 text-xs"></i>
+              <button id="btn-push-docker" ${state.lastLocalBuild && state.lastLocalBuild.ready ? '' : 'disabled'} class="px-2.5 py-1.5 text-xs font-semibold ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm border border-indigo-500/30 cursor-pointer' : 'bg-slate-800 text-slate-500 border border-slate-700/80 opacity-60 cursor-not-allowed'} rounded-lg flex items-center space-x-1.5 transition" title="${state.lastLocalBuild && state.lastLocalBuild.ready ? 'Push Docker Image to Registry' : 'Build an image first before pushing'}">
+                <i class="fa-solid fa-rocket ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'text-indigo-200' : 'text-slate-500'} text-xs"></i>
                 <span>Image Push</span>
               </button>
             </div>
-
-            <!-- Status Indicator Badge -->
-            ${state.lastLocalBuild && state.lastLocalBuild.ready ? `
-              <div class="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center space-x-1.5 shrink-0" title="Local build ready: ${escapeHtml(state.lastLocalBuild.tag)}">
-                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-                <span class="truncate">Build Ready: <strong class="font-mono">${escapeHtml(state.lastLocalBuild.tag)}</strong></span>
-              </div>
-            ` : `
-              <div class="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-slate-500/10 dark:text-slate-400 text-slate-500 border border-slate-500/20 flex items-center space-x-1.5 shrink-0" title="No active local image build">
-                <span class="w-2 h-2 rounded-full bg-slate-400 shrink-0"></span>
-                <span>No Active Build</span>
-              </div>
-            `}
 
             <button id="btn-jobs" class="p-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1 transition" title="Build & Push Jobs">
               <i class="fa-solid fa-list-check text-purple-500"></i>
@@ -1214,6 +1204,9 @@
                 <span>Scroll to Bottom</span>
               </button>
             ` : ''}
+            <button id="btn-copy-logs" class="p-1 hover:text-white transition text-slate-400 hover:text-slate-200" title="Copy Console Logs">
+              <i class="fa-solid fa-copy"></i>
+            </button>
             <button id="btn-clear-logs" class="p-1 hover:text-white transition text-slate-400 hover:text-slate-200" title="Clear Console">
               <i class="fa-solid fa-trash-can"></i>
             </button>
@@ -1223,7 +1216,7 @@
           </div>
         </div>
         <div class="flex-1 relative min-h-0 h-full w-full overflow-hidden bg-slate-950">
-          <pre id="terminal-logs-body" class="absolute inset-0 p-4 overflow-y-auto font-mono text-xs text-emerald-400 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch min-h-0 max-h-full">${escapeHtml(state.activeJobLogs || 'Ready. Click "Build Docker" to compile image and stream logs.')}</pre>
+          <pre id="terminal-logs-body" class="absolute inset-0 p-4 overflow-y-auto font-mono text-xs text-emerald-400 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch min-h-0 max-h-full">${escapeHtml(state.activeJobLogs || 'Ready. Click "Image Build" to compile image and stream logs.')}<div id="terminal-scroll-anchor" class="h-0 w-0"></div></pre>
         </div>
       </div>
     `;
@@ -1469,39 +1462,78 @@
     `;
   }
 
+  function getCurrentRepoName() {
+    if (state.activeRepo?.name && state.activeRepo.name !== 'No Project Loaded') {
+      return state.activeRepo.name.toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+    }
+    if (state.activeRepo?.full_name && state.activeRepo.full_name.includes('/')) {
+      return state.activeRepo.full_name.split('/')[1].toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+    }
+    if (state.currentRepoUrl) {
+      const clean = state.currentRepoUrl.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+      if (clean.includes('/')) {
+        return clean.split('/').pop().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+      }
+    }
+    return 'dockforge';
+  }
+
+  function getJobTypeBadge(actionType) {
+    const type = (actionType || 'build').toLowerCase();
+    if (type === 'build' || type === 'docker_build') {
+      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20"><i class="fa-solid fa-layer-group text-[9px] mr-1"></i>BUILD</span>`;
+    } else if (type === 'push' || type === 'docker_push') {
+      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20"><i class="fa-solid fa-rocket text-[9px] mr-1"></i>PUSH</span>`;
+    } else if (type === 'git_pull' || type === 'pull') {
+      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i class="fa-solid fa-code-branch text-[9px] mr-1"></i>GIT PULL</span>`;
+    } else if (type === 'git_push') {
+      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"><i class="fa-solid fa-code-commit text-[9px] mr-1"></i>GIT PUSH</span>`;
+    }
+    return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-slate-500/10 text-slate-400 border border-slate-500/20">${escapeHtml(type.toUpperCase())}</span>`;
+  }
+
   function renderBuildModal() {
+    const dhUser = state.settings?.dockerhub_username || state.settings?.docker_username || state.settings?.username || '';
+    const currentRepoName = getCurrentRepoName();
+    const defaultTag = dhUser ? `${dhUser}/${currentRepoName}:latest` : `${currentRepoName}:latest`;
+    const currentTargetTag = state.dockerTargetImageTagInput || defaultTag;
+
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
         <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
-              <i class="fa-solid fa-box text-blue-500"></i>
-              <span>Build Local Docker Image</span>
+              <i class="fa-solid fa-layer-group text-blue-500"></i>
+              <span>Build Container Image</span>
             </h3>
             <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
           </div>
 
           <form id="form-build-image" class="space-y-4">
             <div>
-              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Local Image Tag</label>
-              <input type="text" id="build-local-tag" value="${escapeHtml(state.dockerLocalTagInput || 'latest')}" required placeholder="e.g. latest, dev-build"
-                     class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Target Image Tag</label>
+              <input type="text" id="build-target-image-tag" value="${escapeHtml(currentTargetTag)}" required placeholder="e.g. username/repository:tag or dockforge:latest"
+                     class="w-full px-3 py-2.5 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              <p class="text-[11px] text-slate-400 mt-1.5">Defaulted to <code class="text-blue-400 font-mono">${escapeHtml(defaultTag)}</code>. You can customize this tag before building.</p>
             </div>
 
-            <div class="p-3 rounded-lg dark:bg-slate-800/60 bg-slate-100 border dark:border-slate-700/60 border-slate-200 text-xs dark:text-slate-300 text-slate-600 space-y-1">
-              <p class="font-medium text-slate-300">Build Details:</p>
-              <ul class="list-disc list-inside space-y-0.5 text-[11px] text-slate-400">
-                <li>Local Tag: <span class="font-mono text-blue-400">dockforge:${escapeHtml(state.dockerLocalTagInput || 'latest')}</span></li>
-                <li>Context: Workspace Root Directory</li>
-                <li>Logs stream directly to Build Console in real-time.</li>
+            <div class="p-3 rounded-lg dark:bg-slate-800/60 bg-slate-100 border dark:border-slate-700/60 border-slate-200 text-xs dark:text-slate-300 text-slate-600 space-y-1.5">
+              <p class="font-medium text-slate-300 flex items-center space-x-1.5">
+                <i class="fa-solid fa-info-circle text-blue-400"></i>
+                <span>Build Specifications:</span>
+              </p>
+              <ul class="list-disc list-inside space-y-1 text-[11px] text-slate-400">
+                <li>Context Directory: <span class="font-mono text-slate-300">/workspace</span></li>
+                <li>Dockerfile: <span class="font-mono text-slate-300">Dockerfile</span></li>
+                <li>Action: <span class="text-emerald-400 font-medium">Local Docker Compile Only</span> (Decoupled from Push)</li>
               </ul>
             </div>
 
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
-              <button type="submit" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+              <button type="submit" class="px-4 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm transition">
                 <i class="fa-solid fa-play text-xs"></i>
-                <span>Build Local Image</span>
+                <span>Start Build</span>
               </button>
             </div>
           </form>
@@ -1513,6 +1545,33 @@
   function renderPushDockerModal() {
     const dhUser = state.settings?.dockerhub_username || state.settings?.docker_username || '';
     const lastBuildTag = state.lastLocalBuild?.tag || 'latest';
+
+    // Smart repo matching derived from target image tag or last local build
+    const fullBuildTag = state.dockerTargetImageTagInput || (state.lastLocalBuild && state.lastLocalBuild.tag) || '';
+    let autoRepo = state.dockerImageInput || '';
+    let autoTag = state.dockerTagInput || 'latest';
+
+    if (fullBuildTag) {
+      if (fullBuildTag.includes(':')) {
+        const parts = fullBuildTag.split(':');
+        const repoPart = parts[0];
+        autoTag = parts[1] || 'latest';
+        if (repoPart.includes('/')) {
+          autoRepo = repoPart;
+        } else if (dhUser) {
+          autoRepo = `${dhUser}/${repoPart}`;
+        } else {
+          autoRepo = repoPart;
+        }
+      } else if (fullBuildTag.includes('/')) {
+        autoRepo = fullBuildTag;
+      } else if (dhUser) {
+        autoRepo = `${dhUser}/${fullBuildTag}`;
+      }
+    }
+
+    const currentRepoValue = state.dockerImageInput || autoRepo;
+    const currentTagValue = state.dockerTagInput || autoTag;
 
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
@@ -1529,7 +1588,7 @@
           <div class="p-3 mb-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs">
             <div class="flex items-center space-x-2">
               <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-              <span class="dark:text-emerald-300 text-emerald-800 font-medium">Source Image: <strong class="font-mono">dockforge:${escapeHtml(lastBuildTag)}</strong></span>
+              <span class="dark:text-emerald-300 text-emerald-800 font-medium">Source Image: <strong class="font-mono">${escapeHtml(currentRepoValue)}:${escapeHtml(currentTagValue)}</strong></span>
             </div>
             <span class="text-[11px] text-emerald-400/80 font-mono">Ready for registry upload</span>
           </div>
@@ -1560,13 +1619,13 @@
                 <select id="select-push-dockerhub-repo" class="w-full px-3 py-2 mb-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none cursor-pointer">
                   <option value="">-- Select Docker Hub Repository --</option>
                   ${state.dockerHubRepos.map(r => {
-                    const selected = state.dockerImageInput === r.full_name ? 'selected' : '';
+                    const selected = currentRepoValue === r.full_name ? 'selected' : '';
                     const icon = r.is_private ? '🔒' : '🌐';
                     return `<option value="${escapeHtml(r.full_name)}" ${selected}>${icon} ${escapeHtml(r.full_name)}</option>`;
                   }).join('')}
                 </select>
               ` : ''}
-              <input type="text" id="push-docker-repo" value="${escapeHtml(state.dockerImageInput)}" required placeholder="username/repository (e.g. user/my-app)"
+              <input type="text" id="push-docker-repo" value="${escapeHtml(currentRepoValue)}" required placeholder="username/repository (e.g. user/my-app)"
                      class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none" />
             </div>
 
@@ -1576,7 +1635,7 @@
                 ${state.loadingDockerHubTags ? `<span class="text-[11px] text-purple-400 flex items-center space-x-1"><i class="fa-solid fa-spinner animate-spin"></i> <span>Loading tags...</span></span>` : ''}
               </div>
               <div class="flex space-x-2">
-                <input type="text" id="push-docker-tag" value="${escapeHtml(state.dockerTagInput || lastBuildTag)}" required placeholder="e.g. latest, v1.0.0"
+                <input type="text" id="push-docker-tag" value="${escapeHtml(currentTagValue)}" required placeholder="e.g. latest, v1.0.0"
                        class="flex-1 px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none" />
                 <select id="select-push-tag-preset" class="px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs cursor-pointer min-w-[120px]">
                   <option value="">Select Tag</option>
@@ -1588,7 +1647,7 @@
               </div>
             </div>
 
-            <p class="text-[11px] dark:text-slate-400 text-slate-500">Tags local image <span class="font-mono text-purple-400">dockforge:${escapeHtml(lastBuildTag)}</span> and pushes to selected Docker Hub repository.</p>
+            <p class="text-[11px] dark:text-slate-400 text-slate-500">Pushes <span class="font-mono text-purple-400">${escapeHtml(currentRepoValue)}:${escapeHtml(currentTagValue)}</span> to Docker Hub registry.</p>
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
               <button type="submit" class="px-4 py-2 text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
@@ -1618,17 +1677,19 @@
               <thead>
                 <tr class="border-b dark:border-slate-800 border-slate-200 dark:text-slate-400 text-slate-500 uppercase tracking-wider">
                   <th class="py-2.5 px-3">Job ID</th>
-                  <th class="py-2.5 px-3">Image Target</th>
+                  <th class="py-2.5 px-3">Type</th>
+                  <th class="py-2.5 px-3">Image / Target</th>
                   <th class="py-2.5 px-3">Status</th>
                   <th class="py-2.5 px-3">Started</th>
                   <th class="py-2.5 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody class="divide-y dark:divide-slate-800/50 divide-slate-200">
-                ${state.jobs.length === 0 ? `<tr><td colspan="5" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
+                ${state.jobs.length === 0 ? `<tr><td colspan="6" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
                 ${state.jobs.map(j => `
                   <tr class="dark:hover:bg-slate-800/50 hover:bg-slate-100">
                     <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600">${j.id}</td>
+                    <td class="py-2.5 px-3">${getJobTypeBadge(j.job_type || j.action)}</td>
                     <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900">${j.image_name}:${j.tag}</td>
                     <td class="py-2.5 px-3">${getStatusPill(j.status)}</td>
                     <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500">${new Date(j.started_at).toLocaleTimeString()}</td>
@@ -2111,9 +2172,14 @@
 
     // Terminal Scroll & Auto-Scroll Handler
     const term = document.getElementById('terminal-logs-body');
+    const scrollAnchor = document.getElementById('terminal-scroll-anchor');
     if (term) {
       if (state.terminalAutoScroll !== false) {
-        term.scrollTop = term.scrollHeight;
+        if (scrollAnchor && typeof scrollAnchor.scrollIntoView === 'function') {
+          scrollAnchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        } else {
+          term.scrollTop = term.scrollHeight;
+        }
         state.terminalScrollTop = term.scrollTop;
       } else if (state.terminalScrollTop !== null && state.terminalScrollTop !== undefined) {
         term.scrollTop = state.terminalScrollTop;
@@ -2134,6 +2200,27 @@
         }
       });
     }
+
+    document.getElementById('btn-copy-logs')?.addEventListener('click', async () => {
+      const logs = state.activeJobLogs || '';
+      if (!logs) {
+        showToast('Console is empty.', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(logs);
+        const btn = document.getElementById('btn-copy-logs');
+        if (btn) {
+          btn.innerHTML = '<i class="fa-solid fa-check text-emerald-400"></i>';
+          setTimeout(() => {
+            if (btn) btn.innerHTML = '<i class="fa-solid fa-copy"></i>';
+          }, 2000);
+        }
+        showToast('Console logs copied to clipboard!');
+      } catch (err) {
+        showToast('Failed to copy logs to clipboard', true);
+      }
+    });
 
     document.getElementById('btn-terminal-resume-autoscroll')?.addEventListener('click', () => {
       state.terminalAutoScroll = true;
@@ -2352,21 +2439,42 @@
       }
     });
 
-    // Build Local Docker Image Form Handler
+    // Build Container Image Form Handler
     document.getElementById('form-build-image')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const tagInput = document.getElementById('build-local-tag');
-      const tag = tagInput ? tagInput.value.trim() || 'latest' : 'latest';
+      const targetInput = document.getElementById('build-target-image-tag');
+      const targetTag = targetInput ? targetInput.value.trim() : '';
+
+      if (!targetTag) {
+        showToast('Please enter a target image tag', true);
+        return;
+      }
+
+      state.dockerTargetImageTagInput = targetTag;
+
+      let imageName = 'dockforge';
+      let tag = 'latest';
+
+      if (targetTag.includes(':')) {
+        const parts = targetTag.split(':');
+        imageName = parts[0];
+        tag = parts[1] || 'latest';
+      } else {
+        imageName = targetTag;
+      }
+
       state.dockerLocalTagInput = tag;
 
       try {
-        const res = await apiFetch('/api/jobs/build', {
+        const res = await apiFetch('/api/build', {
           method: 'POST',
           body: JSON.stringify({
             action: 'build',
-            image_name: 'dockforge',
+            image_name: imageName,
             tag: tag,
-            local_image: 'dockforge'
+            target_image_tag: targetTag,
+            local_image: 'dockforge',
+            push_to_hub: false
           })
         });
         if (res.ok) {
@@ -2422,7 +2530,7 @@
       state.dockerTagInput = tag;
 
       try {
-        const res = await apiFetch('/api/jobs/build', {
+        const res = await apiFetch('/api/push', {
           method: 'POST',
           body: JSON.stringify({
             action: 'push',

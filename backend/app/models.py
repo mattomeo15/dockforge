@@ -48,6 +48,8 @@ class BuildJobDB(Base):
     started_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
     commit_sha = Column(String(40), nullable=True)
+    action = Column(String(50), default="build")
+    job_type = Column(String(50), default="build")
 
 
 # Pydantic Schemas
@@ -103,10 +105,18 @@ class CredentialsUpdate(BaseModel):
     password: str
 
 class DockerBuildRequest(BaseModel):
-    image_name: str
-    tag: str
+    image_name: Optional[str] = "dockforge"
+    tag: Optional[str] = "latest"
+    target_image_tag: Optional[str] = None
     dockerfile_path: Optional[str] = "Dockerfile"
-    push_to_hub: bool = True
+    push_to_hub: Optional[bool] = False
+    action: Optional[str] = "build"
+
+class DockerPushRequest(BaseModel):
+    image_name: Optional[str] = "dockforge"
+    tag: Optional[str] = "latest"
+    target_image_tag: Optional[str] = None
+    action: Optional[str] = "push"
 
 class DockerHubTagRequest(BaseModel):
     image_name: str
@@ -117,6 +127,8 @@ class BuildJobResponse(BaseModel):
     image_name: str
     tag: str
     status: str
+    action: Optional[str] = "build"
+    job_type: Optional[str] = "build"
     started_at: str
     completed_at: Optional[str] = None
     commit_sha: Optional[str] = None

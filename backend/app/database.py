@@ -46,6 +46,12 @@ def init_db():
         except Exception:
             pass
 
+        try:
+            conn.execute(text("ALTER TABLE build_jobs ADD COLUMN action VARCHAR(50) DEFAULT 'build'"))
+            conn.commit()
+        except Exception:
+            pass
+
     # Ensure default admin user if no user exists
     db = SessionLocal()
     try:

@@ -869,7 +869,12 @@ async function startServer() {
   // Build Jobs List & Logs
   app.get("/api/jobs", authenticateToken, (req, res) => {
     const jobs = readJsonFile(JOBS_FILE, []);
-    res.json(jobs);
+    const formatted = jobs.map((j: any) => ({
+      ...j,
+      job_type: j.job_type || j.action || "build",
+      action: j.action || j.job_type || "build",
+    }));
+    res.json(formatted);
   });
 
   app.get("/api/jobs/:jobId/logs", authenticateToken, (req, res) => {
@@ -882,15 +887,19 @@ async function startServer() {
     res.status(404).json({ detail: "Log file not found" });
   });
 
-  // Trigger Build Job
-  app.post("/api/jobs/build", authenticateToken, (req, res) => {
+  // Trigger Build Job (Build image only)
+  app.post(["/api/build", "/api/jobs/build"], authenticateToken, (req, res) => {
     if (isBuildingGlobal) {
       return res.status(400).json({ detail: "A build or push job is already running." });
     }
 
-    const { image_name, tag, action = "build", local_image = "dockforge" } = req.body;
-    if (!image_name || !tag) {
-      return res.status(400).json({ detail: "Image name and tag required" });
+    let { image_name = "dockforge", tag = "latest", target_image_tag, action = "build", local_image = "dockforge" } = req.body;
+    if (target_image_tag && target_image_tag.includes(":")) {
+      const parts = target_image_tag.split(":");
+      image_name = parts[0];
+      tag = parts[1] || "latest";
+    } else if (target_image_tag) {
+      image_name = target_image_tag;
     }
 
     const jobId = `job_${Date.now()}`;
@@ -899,7 +908,8 @@ async function startServer() {
     const newJob = {
       id: jobId,
       repo_url: "workspace",
-      action, // 'build', 'push', or 'build_and_push'
+      action: action === "push" ? "push" : "build",
+      job_type: action === "push" ? "push" : "build",
       image_name,
       tag,
       local_image,
@@ -912,7 +922,45 @@ async function startServer() {
     jobs.unshift(newJob);
     writeJsonFile(JOBS_FILE, jobs);
 
-    res.json({ job_id: jobId, status: "queued", message: `Job queued (${action})` });
+    res.json({ job_id: jobId, status: "queued", message: `Job queued (${newJob.action})` });
+  });
+
+  // Trigger Push Job (Push image only)
+  app.post(["/api/push", "/api/jobs/push"], authenticateToken, (req, res) => {
+    if (isBuildingGlobal) {
+      return res.status(400).json({ detail: "A build or push job is already running." });
+    }
+
+    let { image_name = "dockforge", tag = "latest", target_image_tag, local_image = "dockforge" } = req.body;
+    if (target_image_tag && target_image_tag.includes(":")) {
+      const parts = target_image_tag.split(":");
+      image_name = parts[0];
+      tag = parts[1] || "latest";
+    } else if (target_image_tag) {
+      image_name = target_image_tag;
+    }
+
+    const jobId = `job_${Date.now()}`;
+    const jobs = readJsonFile(JOBS_FILE, []);
+
+    const newJob = {
+      id: jobId,
+      repo_url: "workspace",
+      action: "push",
+      job_type: "push",
+      image_name,
+      tag,
+      local_image,
+      status: "queued",
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      commit_sha: "head",
+    };
+
+    jobs.unshift(newJob);
+    writeJsonFile(JOBS_FILE, jobs);
+
+    res.json({ job_id: jobId, status: "queued", message: "Push job queued" });
   });
 
   // Handle WebSocket upgrades
@@ -1117,56 +1165,19 @@ async function startServer() {
 
       const dockerSockExists = fs.existsSync("/var/run/docker.sock");
 
-      if (action === "build" || action === "build_and_push") {
-        if (dockerSockExists) {
-          await emit("🐳 Host Docker Socket detected at /var/run/docker.sock");
-          await emit(`🛠️ Executing: docker build -t ${localImageName}:${job.tag} .`);
-
-          const buildProc = spawn("docker", ["build", "-t", `${localImageName}:${job.tag}`, "."], {
-            cwd: WORKSPACE_DIR,
-          });
-          activeChildProcesses.add(buildProc);
-          buildProc.on("close", () => activeChildProcesses.delete(buildProc));
-          buildProc.on("exit", () => activeChildProcesses.delete(buildProc));
-
-          buildProc.stdout.on("data", (data) => emit(data.toString().trim()));
-          buildProc.stderr.on("data", (data) => emit(data.toString().trim()));
-
-          await new Promise((resolve) => buildProc.on("close", resolve));
-        } else {
-          await emit("⚙️ Running in DockForge Build Engine Sandbox mode...");
-          await new Promise((r) => setTimeout(r, 600));
-          await emit("Step 1/6 : FROM python:3.11-slim");
-          await new Promise((r) => setTimeout(r, 700));
-          await emit(" ---> Downloading base layers: [====================>] 100%");
-          await emit(" ---> Pull complete python:3.11-slim");
-          await new Promise((r) => setTimeout(r, 800));
-          await emit("Step 2/6 : WORKDIR /app");
-          await emit(" ---> Running in container b712a4e");
-          await new Promise((r) => setTimeout(r, 600));
-          await emit("Step 3/6 : COPY requirements.txt .");
-          await emit(" ---> 5c9103e8211a");
-          await new Promise((r) => setTimeout(r, 900));
-          await emit("Step 4/6 : RUN pip install --no-cache-dir -r requirements.txt");
-          await emit(" ---> Collecting fastapi, uvicorn...");
-          await emit(" ---> Successfully installed packages");
-          await new Promise((r) => setTimeout(r, 700));
-          await emit("Step 5/6 : COPY . .");
-          await emit(" ---> 3a102b489c0d");
-          await new Promise((r) => setTimeout(r, 600));
-          await emit("Step 6/6 : EXPOSE 8000");
-          await emit(` ---> Successfully built local image: ${localImageName}:${job.tag}`);
-          await new Promise((r) => setTimeout(r, 500));
-        }
-
-        if (action === "build") {
-          await emit("==================================================");
-          await emit(`✨ LOCAL DOCKER BUILD FINISHED SUCCESSFULLY [${localImageName}:${job.tag}] ✨`);
-          await emit("==================================================");
-        }
+      // Format target image tag using configured Docker Hub username if available
+      let targetRepo = job.image_name || "dockforge";
+      if (dockerUser && !targetRepo.includes("/")) {
+        targetRepo = `${dockerUser}/${targetRepo}`;
       }
+      const fullImageTag = `${targetRepo}:${job.tag}`;
 
-      if (action === "push" || action === "build_and_push") {
+      if (action === "push") {
+        await emit("==================================================");
+        await emit(`🚀 Starting DockForge Image Push Job: ${jobId}`);
+        await emit(`📦 Target Image: ${fullImageTag}`);
+        await emit("==================================================");
+
         if (dockerSockExists) {
           if (dockerUser && dockerPass) {
             await emit(`🔐 Authenticating with Docker Hub as '${dockerUser}'...`);
@@ -1187,13 +1198,13 @@ async function startServer() {
             }
           }
 
-          await emit(`🏷️ Tagging image: docker tag ${localImageName}:${job.tag} ${job.image_name}:${job.tag}`);
-          const tagProc = spawn("docker", ["tag", `${localImageName}:${job.tag}`, `${job.image_name}:${job.tag}`], { cwd: WORKSPACE_DIR });
+          await emit(`🏷️ Tagging image: docker tag ${localImageName}:${job.tag} ${fullImageTag}`);
+          const tagProc = spawn("docker", ["tag", `${localImageName}:${job.tag}`, fullImageTag], { cwd: WORKSPACE_DIR });
           activeChildProcesses.add(tagProc);
           await new Promise((resolve) => tagProc.on("close", resolve));
 
-          await emit(`⬆️ Executing: docker push ${job.image_name}:${job.tag}`);
-          const pushProc = spawn("docker", ["push", `${job.image_name}:${job.tag}`], {
+          await emit(`⬆️ Executing: docker push ${fullImageTag}`);
+          const pushProc = spawn("docker", ["push", fullImageTag], {
             cwd: WORKSPACE_DIR,
           });
           activeChildProcesses.add(pushProc);
@@ -1205,28 +1216,84 @@ async function startServer() {
 
           await new Promise((resolve) => pushProc.on("close", resolve));
         } else {
-          if (action === "push") {
-            await emit("⚙️ Running in DockForge Push Engine Sandbox mode...");
-          }
-          if (dockerUser && dockerPass) {
+          await emit("⚙️ Operating in DockForge Push Engine Sandbox mode...");
+          if (dockerUser) {
             await emit(`🔐 Authenticated with Docker Hub as '${dockerUser}' (PAT Active)`);
           } else {
             await emit("ℹ️ No Docker Hub PAT configured in Settings. Proceeding with public target...");
           }
-          await emit(`🏷️ Tagging local image '${localImageName}:${job.tag}' as '${job.image_name}:${job.tag}'`);
+          await emit(`🏷️ Tagging local image '${localImageName}:${job.tag}' as '${fullImageTag}'`);
           await new Promise((r) => setTimeout(r, 600));
-          await emit(`⬆️ Pushing container image [docker.io/${job.image_name}:${job.tag}] to Docker Hub...`);
+          await emit(`⬆️ Pushing container image [docker.io/${fullImageTag}] to Docker Hub...`);
           await new Promise((r) => setTimeout(r, 900));
-          await emit(`The push refers to repository [docker.io/${job.image_name}]`);
+          await emit(`The push refers to repository [docker.io/${targetRepo}]`);
           await emit("Layer 1/3: 3a102b489c0d: Pushed [12.4 MB]");
           await emit("Layer 2/3: 5c9103e8211a: Pushed [2.8 MB]");
           await emit("Layer 3/3: b712a4e0192a: Layer already exists");
           await emit(`${job.tag}: digest: sha256:8f12a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0 size: 1420`);
-          await emit(`🎉 Container image '${job.image_name}:${job.tag}' successfully published to Docker Hub!`);
+          await emit(`🎉 Container image '${fullImageTag}' successfully published to Docker Hub!`);
         }
 
         await emit("==================================================");
-        await emit(`✨ DOCKER PUSH FINISHED SUCCESSFULLY [${job.image_name}:${job.tag}] ✨`);
+        await emit(`✨ DOCKER PUSH FINISHED SUCCESSFULLY [${fullImageTag}] ✨`);
+        await emit("==================================================");
+      } else {
+        // Default action === 'build'
+        await emit("==================================================");
+        await emit(`🚀 Starting DockForge Image Build Job: ${jobId}`);
+        await emit(`📦 Target Image Tag: ${fullImageTag}`);
+        await emit(`📁 Context Directory: ${WORKSPACE_DIR}`);
+        await emit("==================================================");
+
+        if (dockerSockExists) {
+          await emit("🐳 Host Docker Socket detected at /var/run/docker.sock");
+          await emit(`🛠️ Executing: docker build -t ${fullImageTag} .`);
+
+          const buildProc = spawn("docker", ["build", "-t", fullImageTag, "."], {
+            cwd: WORKSPACE_DIR,
+          });
+          activeChildProcesses.add(buildProc);
+          buildProc.on("close", () => activeChildProcesses.delete(buildProc));
+          buildProc.on("exit", () => activeChildProcesses.delete(buildProc));
+
+          buildProc.stdout.on("data", (data) => emit(data.toString().trim()));
+          buildProc.stderr.on("data", (data) => emit(data.toString().trim()));
+
+          await new Promise((resolve) => buildProc.on("close", resolve));
+
+          if (fullImageTag !== `${localImageName}:${job.tag}`) {
+            const tagProc = spawn("docker", ["tag", fullImageTag, `${localImageName}:${job.tag}`], { cwd: WORKSPACE_DIR });
+            activeChildProcesses.add(tagProc);
+            await new Promise((resolve) => tagProc.on("close", resolve));
+          }
+        } else {
+          await emit("⚙️ Operating in DockForge Build Engine Sandbox mode...");
+          await new Promise((r) => setTimeout(r, 600));
+          await emit("Step 1/6 : FROM python:3.11-slim");
+          await new Promise((r) => setTimeout(r, 700));
+          await emit(" ---> Downloading base layers: [====================>] 100%");
+          await emit(" ---> Pull complete python:3.11-slim");
+          await new Promise((r) => setTimeout(r, 800));
+          await emit("Step 2/6 : WORKDIR /app");
+          await emit(" ---> Running in container b712a4e");
+          await new Promise((r) => setTimeout(r, 600));
+          await emit("Step 3/6 : COPY requirements.txt .");
+          await emit(" ---> 5c9103e8211a");
+          await new Promise((r) => setTimeout(r, 900));
+          await emit("Step 4/6 : RUN pip install --no-cache-dir -r requirements.txt");
+          await emit(" ---> Collecting fastapi, uvicorn...");
+          await emit(" ---> Successfully installed packages");
+          await new Promise((r) => setTimeout(r, 700));
+          await emit("Step 5/6 : COPY . .");
+          await emit(" ---> 3a102b489c0d");
+          await new Promise((r) => setTimeout(r, 600));
+          await emit("Step 6/6 : EXPOSE 8000");
+          await emit(` ---> Successfully built image: ${fullImageTag}`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        await emit("==================================================");
+        await emit(`✨ DOCKER BUILD FINISHED SUCCESSFULLY [${fullImageTag}] ✨`);
         await emit("==================================================");
       }
 

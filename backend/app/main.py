@@ -13,7 +13,7 @@ from backend.app.models import (
     UserDB, SettingsDB, BuildJobDB,
     UserLogin, TokenResponse, SettingsSchema, TestConnectionRequest,
     RepoPullRequest, FileContentRequest, FileOperationRequest,
-    GitPushRequest, DockerBuildRequest, DockerHubTagRequest, CredentialsUpdate
+    GitPushRequest, DockerBuildRequest, DockerPushRequest, DockerHubTagRequest, CredentialsUpdate
 )
 from backend.app.services.auth_service import (
     verify_password, get_password_hash, create_access_token, get_current_user
@@ -327,6 +327,8 @@ def list_build_jobs(db: Session = Depends(get_db), current_user: UserDB = Depend
             "image_name": j.image_name,
             "tag": j.tag,
             "status": j.status,
+            "action": getattr(j, "action", "build") or "build",
+            "job_type": getattr(j, "job_type", None) or getattr(j, "action", "build") or "build",
             "started_at": j.started_at.isoformat() if j.started_at else None,
             "completed_at": j.completed_at.isoformat() if j.completed_at else None,
             "commit_sha": j.commit_sha
@@ -345,6 +347,7 @@ def get_job_logs(job_id: str, db: Session = Depends(get_db), current_user: UserD
         return {"job_id": job_id, "logs": log_file.read_text(encoding="utf-8")}
     return {"job_id": job_id, "logs": "Log file not found."}
 
+@app.post("/api/build")
 @app.post("/api/jobs/build")
 async def trigger_build_job(
     payload: DockerBuildRequest,
@@ -352,20 +355,27 @@ async def trigger_build_job(
     current_user: UserDB = Depends(get_current_user)
 ):
     if DockerService.is_building:
-        raise HTTPException(status_code=400, detail="A build job is already running.")
-
-    settings = db.query(SettingsDB).first()
-    dh_user = settings.dockerhub_username if settings else None
-    dh_token = settings.dockerhub_token if settings else None
+        raise HTTPException(status_code=400, detail="A build or push job is already running.")
 
     job_id = str(uuid.uuid4())
     log_file = str(Path("./data/logs") / f"{job_id}.log")
 
+    image_name = payload.image_name or "dockforge"
+    tag = payload.tag or "latest"
+    if payload.target_image_tag and ":" in payload.target_image_tag:
+        parts = payload.target_image_tag.split(":", 1)
+        image_name = parts[0]
+        tag = parts[1]
+    elif payload.target_image_tag:
+        image_name = payload.target_image_tag
+
     job = BuildJobDB(
         id=job_id,
         repo_url="workspace",
-        image_name=payload.image_name,
-        tag=payload.tag,
+        image_name=image_name,
+        tag=tag,
+        action=payload.action or "build",
+        job_type=payload.action or "build",
         status="building",
         log_file=log_file,
         started_at=datetime.datetime.utcnow()
@@ -374,6 +384,44 @@ async def trigger_build_job(
     db.commit()
 
     return {"job_id": job_id, "status": "started", "message": "Build job initiated"}
+
+@app.post("/api/push")
+@app.post("/api/jobs/push")
+async def trigger_push_job(
+    payload: DockerPushRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    if DockerService.is_building:
+        raise HTTPException(status_code=400, detail="A build or push job is already running.")
+
+    job_id = str(uuid.uuid4())
+    log_file = str(Path("./data/logs") / f"{job_id}.log")
+
+    image_name = payload.image_name or "dockforge"
+    tag = payload.tag or "latest"
+    if payload.target_image_tag and ":" in payload.target_image_tag:
+        parts = payload.target_image_tag.split(":", 1)
+        image_name = parts[0]
+        tag = parts[1]
+    elif payload.target_image_tag:
+        image_name = payload.target_image_tag
+
+    job = BuildJobDB(
+        id=job_id,
+        repo_url="workspace",
+        image_name=image_name,
+        tag=tag,
+        action="push",
+        job_type="push",
+        status="building",
+        log_file=log_file,
+        started_at=datetime.datetime.utcnow()
+    )
+    db.add(job)
+    db.commit()
+
+    return {"job_id": job_id, "status": "started", "message": "Push job initiated"}
 
 # Real-time WebSocket Log Streaming Endpoint
 @app.websocket("/ws/build/{job_id}")
@@ -396,16 +444,24 @@ async def websocket_build_logs(websocket: WebSocket, job_id: str, db: Session = 
         except Exception:
             pass
 
-    success = await DockerService.build_and_push_stream(
-        job_id=job.id,
-        image_name=job.image_name,
-        tag=job.tag,
-        dockerfile_path="Dockerfile",
-        push_to_hub=True,
-        dockerhub_username=dh_user,
-        dockerhub_token=dh_token,
-        log_callback=log_callback
-    )
+    if getattr(job, "action", "build") == "push":
+        success = await DockerService.push_stream(
+            job_id=job.id,
+            image_name=job.image_name,
+            tag=job.tag,
+            dockerhub_username=dh_user,
+            dockerhub_token=dh_token,
+            log_callback=log_callback
+        )
+    else:
+        success = await DockerService.build_stream(
+            job_id=job.id,
+            image_name=job.image_name,
+            tag=job.tag,
+            dockerfile_path="Dockerfile",
+            dockerhub_username=dh_user,
+            log_callback=log_callback
+        )
 
     # Update job status
     job.status = "success" if success else "failure"
