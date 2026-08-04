@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Ignore nested runtime workspace and internal git files
+**/data/
+**/workspace/.git/
+**/.git/
