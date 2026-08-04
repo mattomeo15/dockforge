@@ -13,9 +13,26 @@ import { Socket } from "net";
 
 const execAsync = promisify(exec);
 
+// 1. Safe Git Directory Configuration on Backend Startup
+try {
+  const { execSync } = require("child_process");
+  execSync('git config --global --add safe.directory "*"', { stdio: "ignore" });
+  console.log('✅ Configured Git global safe.directory "*"');
+} catch (gitConfigErr: any) {
+  console.error("⚠️ Notice configuring git safe.directory:", gitConfigErr?.message || gitConfigErr);
+}
+
+const GIT_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_ASKPASS: "echo",
+};
+
 const INITIAL_PORT = parseInt(process.env.PORT || "3000", 10);
 const SECRET_KEY = process.env.SECRET_KEY || "dockforge_super_secret_jwt_key_2026";
-const DATA_DIR = path.join(process.cwd(), "backend", "data");
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(process.cwd(), "backend", "data");
 
 const activeChildProcesses = new Set<ChildProcess>();
 const activeSockets = new Set<Socket>();
@@ -26,31 +43,67 @@ const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const JOBS_FILE = path.join(DATA_DIR, "jobs.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 
-// Ensure directories exist
-[DATA_DIR, WORKSPACE_DIR, LOGS_DIR].forEach((dir) => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
+console.log(`📂 Storage Configuration: DATA_DIR=${DATA_DIR}`);
+console.log(`💻 Workspace Path: ${WORKSPACE_DIR}`);
 
-// Helper for JSON storage
+// Ensure storage directories exist with recursive flags and permission error handling
+try {
+  [DATA_DIR, WORKSPACE_DIR, LOGS_DIR].forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`📁 Created storage directory: ${dir}`);
+    }
+  });
+} catch (dirErr: any) {
+  console.error(`❌ [FS ERROR] Failed initializing storage directories under ${DATA_DIR}:`, dirErr?.message || dirErr);
+}
+
+// Helper to inject GitHub PAT into HTTPS remote URLs
+function formatAuthedGithubUrl(url: string, token?: string): string {
+  if (!url) return url;
+  let cleanUrl = url.trim();
+  if (!token || !token.trim()) return cleanUrl;
+  const pat = token.trim();
+
+  if (cleanUrl.startsWith("git@github.com:")) {
+    const repoPath = cleanUrl.replace("git@github.com:", "").replace(/\.git$/, "");
+    return `https://${pat}@github.com/${repoPath}.git`;
+  }
+
+  if (cleanUrl.includes("github.com")) {
+    const match = cleanUrl.match(/github\.com[/:]([^/]+)\/([^/\s.]+?)(\.git)?$/);
+    if (match) {
+      const owner = match[1];
+      const repo = match[2];
+      return `https://${pat}@github.com/${owner}/${repo}.git`;
+    }
+  }
+
+  return cleanUrl;
+}
+
+// Helper for JSON storage with error handling
 function readJsonFile<T>(filePath: string, defaultValue: T): T {
   try {
     if (fs.existsSync(filePath)) {
       const data = fs.readFileSync(filePath, "utf-8");
       return JSON.parse(data);
     }
-  } catch (err) {
-    console.error(`Error reading ${filePath}:`, err);
+  } catch (err: any) {
+    console.error(`❌ [FS ERROR] Error reading JSON file ${filePath}:`, err?.message || err);
   }
   return defaultValue;
 }
 
 function writeJsonFile<T>(filePath: string, data: T): void {
   try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-  } catch (err) {
-    console.error(`Error writing ${filePath}:`, err);
+  } catch (err: any) {
+    console.error(`❌ [FS ERROR] Error writing JSON file ${filePath}:`, err?.message || err);
   }
 }
 
@@ -462,26 +515,33 @@ async function startServer() {
   });
 
   const createWorkspaceItem = (req: any, res: any) => {
-    const { path: filePath, content, is_folder } = req.body;
-    if (!filePath) return res.status(400).json({ detail: "Path required" });
+    try {
+      const { path: filePath, content, is_folder } = req.body;
+      if (!filePath) return res.status(400).json({ detail: "Path required" });
 
-    const safePath = path.join(WORKSPACE_DIR, path.normalize(filePath));
-    if (!safePath.startsWith(WORKSPACE_DIR)) {
-      return res.status(400).json({ detail: "Invalid path" });
-    }
-
-    if (is_folder) {
-      fs.mkdirSync(safePath, { recursive: true });
-      return res.json({ status: "success", message: `Folder created: ${filePath}` });
-    } else {
-      fs.mkdirSync(path.dirname(safePath), { recursive: true });
-      if (typeof content === "string" && content.startsWith("data:") && content.includes(";base64,")) {
-        const base64Data = content.split(";base64,").pop() || "";
-        fs.writeFileSync(safePath, Buffer.from(base64Data, "base64"));
-      } else {
-        fs.writeFileSync(safePath, content || "", "utf-8");
+      const safePath = path.join(WORKSPACE_DIR, path.normalize(filePath));
+      if (!safePath.startsWith(WORKSPACE_DIR)) {
+        return res.status(400).json({ detail: "Invalid path" });
       }
-      return res.json({ status: "success", message: `File saved: ${filePath}` });
+
+      if (is_folder) {
+        fs.mkdirSync(safePath, { recursive: true });
+        console.log(`📁 Created folder: ${filePath}`);
+        return res.json({ status: "success", message: `Folder created: ${filePath}` });
+      } else {
+        fs.mkdirSync(path.dirname(safePath), { recursive: true });
+        if (typeof content === "string" && content.startsWith("data:") && content.includes(";base64,")) {
+          const base64Data = content.split(";base64,").pop() || "";
+          fs.writeFileSync(safePath, Buffer.from(base64Data, "base64"));
+        } else {
+          fs.writeFileSync(safePath, content || "", "utf-8");
+        }
+        console.log(`📄 Saved file: ${filePath}`);
+        return res.json({ status: "success", message: `File saved: ${filePath}` });
+      }
+    } catch (err: any) {
+      console.error(`❌ [FS ERROR] Failed workspace item creation:`, err?.message || err);
+      return res.status(500).json({ detail: `File creation error: ${err?.message || err}` });
     }
   };
 
@@ -496,16 +556,22 @@ async function startServer() {
   });
 
   const deleteWorkspaceItem = (req: any, res: any) => {
-    const filePath = (req.query.path || req.body?.path) as string;
-    if (!filePath) return res.status(400).json({ detail: "Path required" });
+    try {
+      const filePath = (req.query.path || req.body?.path) as string;
+      if (!filePath) return res.status(400).json({ detail: "Path required" });
 
-    const safePath = path.join(WORKSPACE_DIR, path.normalize(filePath));
-    if (!safePath.startsWith(WORKSPACE_DIR) || !fs.existsSync(safePath)) {
-      return res.status(404).json({ detail: "File or directory not found" });
+      const safePath = path.join(WORKSPACE_DIR, path.normalize(filePath));
+      if (!safePath.startsWith(WORKSPACE_DIR) || !fs.existsSync(safePath)) {
+        return res.status(404).json({ detail: "File or directory not found" });
+      }
+
+      fs.rmSync(safePath, { recursive: true, force: true });
+      console.log(`🗑️ Deleted workspace item: ${filePath}`);
+      res.json({ status: "success", message: `Deleted ${filePath}` });
+    } catch (err: any) {
+      console.error(`❌ [FS ERROR] Failed deleting workspace item:`, err?.message || err);
+      return res.status(500).json({ detail: `Delete operation error: ${err?.message || err}` });
     }
-
-    fs.rmSync(safePath, { recursive: true, force: true });
-    res.json({ status: "success", message: `Deleted ${filePath}` });
   };
 
   app.delete("/api/workspace/file", authenticateToken, deleteWorkspaceItem);
@@ -517,8 +583,10 @@ async function startServer() {
         fs.rmSync(WORKSPACE_DIR, { recursive: true, force: true });
       }
       fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+      console.log("🧹 Workspace cleared successfully.");
       res.json({ status: "success", message: "Workspace cleared successfully" });
     } catch (err: any) {
+      console.error(`❌ [FS ERROR] Failed clearing workspace:`, err?.message || err);
       res.status(500).json({ detail: err.message || "Failed to clear workspace" });
     }
   };
@@ -526,59 +594,57 @@ async function startServer() {
   app.post("/api/workspace/clear", authenticateToken, clearWorkspaceHandler);
   app.delete("/api/workspace/clear", authenticateToken, clearWorkspaceHandler);
 
-  // Pull Repository
+  // Pull / Clone Repository Endpoint
   app.post("/api/repo/pull", authenticateToken, async (req, res) => {
     const { url, branch = "main" } = req.body;
     if (!url) return res.status(400).json({ detail: "Repository URL required" });
 
     const currentSettings = readJsonFile(SETTINGS_FILE, { github_token: "" });
-    let cleanUrl = url.trim();
+    const token = currentSettings.github_token?.trim();
+    const cleanUrl = url.trim();
+    const authedUrl = formatAuthedGithubUrl(cleanUrl, token);
 
-    const attemptClone = async (targetUrl: string) => {
+    // If repository already exists in WORKSPACE_DIR, perform git pull first
+    const isGitRepo = fs.existsSync(path.join(WORKSPACE_DIR, ".git"));
+    if (isGitRepo) {
+      try {
+        console.log(`🔄 Performing 'git pull' in existing repository: ${WORKSPACE_DIR}`);
+        if (token) {
+          await execAsync(`git remote set-url origin "${authedUrl}"`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
+        }
+        await execAsync(`git pull origin ${branch}`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
+        const { stdout: commitSha } = await execAsync(`git rev-parse --short HEAD`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
+        return res.json({
+          status: "success",
+          message: `Successfully pulled repository updates (${branch})`,
+          commit_sha: commitSha.trim(),
+        });
+      } catch (pullErr: any) {
+        console.warn(`⚠️ 'git pull' in existing repo failed (${pullErr.message}). Falling back to fresh clone...`);
+      }
+    }
+
+    // Fresh clone handler
+    try {
       if (fs.existsSync(WORKSPACE_DIR)) {
         fs.rmSync(WORKSPACE_DIR, { recursive: true, force: true });
       }
       fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-      await execAsync(`GIT_TERMINAL_PROMPT=0 git clone -b ${branch} --depth 1 "${targetUrl}" "${WORKSPACE_DIR}"`);
-      const { stdout: commitSha } = await execAsync(`git rev-parse --short HEAD`, { cwd: WORKSPACE_DIR });
-      return commitSha.trim();
-    };
+      console.log(`📥 Executing git clone for repository (${branch})`);
+      await execAsync(`git clone -b ${branch} --depth 1 "${authedUrl}" "${WORKSPACE_DIR}"`, { env: GIT_ENV });
+      const { stdout: commitSha } = await execAsync(`git rev-parse --short HEAD`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
 
-    // Step 1: Attempt anonymous clone first
-    try {
-      const commitSha = await attemptClone(cleanUrl);
       return res.json({
         status: "success",
-        message: `Successfully pulled repository (${branch})`,
-        commit_sha: commitSha,
+        message: `Successfully cloned repository (${branch})`,
+        commit_sha: commitSha.trim(),
       });
-    } catch (anonErr: any) {
-      // Step 2: Fallback to PAT if available
-      const token = currentSettings.github_token?.trim();
-      if (token) {
-        let authedUrl = cleanUrl;
-        if (cleanUrl.includes("github.com") && !cleanUrl.includes("@github.com")) {
-          authedUrl = cleanUrl.replace("https://", `https://x-access-token:${token}@`);
-        }
-        try {
-          const commitSha = await attemptClone(authedUrl);
-          return res.json({
-            status: "success",
-            message: `Successfully pulled repository (${branch}) using GitHub PAT`,
-            commit_sha: commitSha,
-          });
-        } catch (patErr: any) {
-          return res.status(400).json({
-            detail: `Failed to clone repository with saved GitHub PAT. Please verify your token in Settings. (${patErr.message || "Authentication failed"})`,
-          });
-        }
-      } else {
-        // Step 3: No PAT set and anonymous clone failed
-        return res.status(400).json({
-          detail: "This repository appears to be private or requires authentication. Please set a Personal Access Token (PAT) in Settings to pull private repositories.",
-        });
-      }
+    } catch (cloneErr: any) {
+      console.error(`❌ [GIT ERROR] Git clone failed:`, cloneErr?.message || cloneErr);
+      return res.status(400).json({
+        detail: `Failed to pull/clone repository: ${cloneErr.message || "Authentication or network error"}. If this is a private repository, verify your GitHub Personal Access Token in Settings.`,
+      });
     }
   });
 
@@ -903,20 +969,20 @@ async function startServer() {
         // 1. Configure Git Author identity if not set
         await emit("🔧 Configuring Git Author identity...");
         try {
-          await execAsync(`git config user.name "DockForge User"`, { cwd: WORKSPACE_DIR });
-          await execAsync(`git config user.email "dockforge@local"`, { cwd: WORKSPACE_DIR });
+          await execAsync(`git config user.name "DockForge User"`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
+          await execAsync(`git config user.email "dockforge@local"`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
           await emit("  └─ Set user.name 'DockForge User' & user.email 'dockforge@local'");
         } catch (e: any) {
           await emit(`  └─ ⚠️ Notice configuring git user: ${e.message}`);
         }
 
-        // 2. Verify /workspace is a Git repository
+        // 2. Verify workspace is a Git repository
         await emit("🔍 Verifying Git repository status...");
         try {
-          await execAsync(`git rev-parse --is-inside-work-tree`, { cwd: WORKSPACE_DIR });
+          await execAsync(`git rev-parse --is-inside-work-tree`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
           await emit("  └─ Workspace is a valid Git repository.");
         } catch (e: any) {
-          await emit("💥 Error: /workspace is not a Git repository. Please clone or pull a repository first.");
+          await emit("💥 Error: workspace is not a Git repository. Please clone or pull a repository first.");
           job.status = "failure";
           job.completed_at = new Date().toISOString();
           writeJsonFile(JOBS_FILE, jobs);
@@ -927,7 +993,7 @@ async function startServer() {
         // 3. Stage changes (git add .)
         await emit("➕ Staging workspace changes (git add .)...");
         try {
-          const addProc = spawn("git", ["add", "."], { cwd: WORKSPACE_DIR });
+          const addProc = spawn("git", ["add", "."], { cwd: WORKSPACE_DIR, env: GIT_ENV });
           activeChildProcesses.add(addProc);
           addProc.stdout.on("data", (data) => emit(data.toString().trim()));
           addProc.stderr.on("data", (data) => emit(data.toString().trim()));
@@ -938,12 +1004,12 @@ async function startServer() {
         }
 
         // 4. Commit changes if any exist
-        const { stdout: statusOut } = await execAsync(`git status --porcelain`, { cwd: WORKSPACE_DIR }).catch(() => ({ stdout: "" }));
+        const { stdout: statusOut } = await execAsync(`git status --porcelain`, { cwd: WORKSPACE_DIR, env: GIT_ENV }).catch(() => ({ stdout: "" }));
         const commitMsg = job.commit_message || job.message || "Update from DockForge";
 
         if (statusOut.trim()) {
           await emit(`📝 Committing changes with message: "${commitMsg}"`);
-          const commitProc = spawn("git", ["commit", "-m", commitMsg], { cwd: WORKSPACE_DIR });
+          const commitProc = spawn("git", ["commit", "-m", commitMsg], { cwd: WORKSPACE_DIR, env: GIT_ENV });
           activeChildProcesses.add(commitProc);
           commitProc.stdout.on("data", (data) => emit(data.toString().trim()));
           commitProc.stderr.on("data", (data) => emit(data.toString().trim()));
@@ -961,7 +1027,7 @@ async function startServer() {
         const token = currentSettings.github_token?.trim();
         let originUrl = "";
         try {
-          const { stdout } = await execAsync(`git remote get-url origin`, { cwd: WORKSPACE_DIR });
+          const { stdout } = await execAsync(`git remote get-url origin`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
           originUrl = stdout.trim();
         } catch (e) {
           await emit("⚠️ Warning: No remote origin URL configured for workspace.");
@@ -969,16 +1035,9 @@ async function startServer() {
 
         if (originUrl) {
           if (token) {
-            const match = originUrl.match(/github\.com[:/]([^/]+)\/([^/\s.]+)(\.git)?/);
-            if (match) {
-              const owner = match[1];
-              const repo = match[2];
-              const authedUrl = `https://${token}@github.com/${owner}/${repo}.git`;
-              await execAsync(`git remote set-url origin "${authedUrl}"`, { cwd: WORKSPACE_DIR });
-              await emit(`🔐 Injected GitHub PAT into remote origin URL: https://${token.substring(0, 4)}***@github.com/${owner}/${repo}.git`);
-            } else {
-              await emit(`🔗 Remote origin URL: ${originUrl}`);
-            }
+            const authedUrl = formatAuthedGithubUrl(originUrl, token);
+            await execAsync(`git remote set-url origin "${authedUrl}"`, { cwd: WORKSPACE_DIR, env: GIT_ENV });
+            await emit(`🔐 Injected GitHub PAT into remote origin URL`);
           } else {
             await emit("ℹ️ No GitHub PAT configured in Settings. Proceeding with default git credentials...");
           }
@@ -988,7 +1047,7 @@ async function startServer() {
         const targetBranch = job.branch || "main";
         await emit(`⬆️ Executing: git push origin ${targetBranch}`);
 
-        const pushProc = spawn("git", ["push", "origin", targetBranch], { cwd: WORKSPACE_DIR });
+        const pushProc = spawn("git", ["push", "origin", targetBranch], { cwd: WORKSPACE_DIR, env: GIT_ENV });
         activeChildProcesses.add(pushProc);
 
         let pushOutput = "";

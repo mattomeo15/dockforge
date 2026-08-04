@@ -40,6 +40,12 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     init_db()
+    try:
+        import subprocess
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], check=False)
+        print('✅ Configured Git global safe.directory "*" in FastAPI backend')
+    except Exception as e:
+        print(f"⚠️ Notice configuring git safe.directory in FastAPI: {e}")
 
 # Health Check
 @app.get("/api/health")
