@@ -86,15 +86,21 @@ class FileItem(BaseModel):
 
 class FileContentRequest(BaseModel):
     path: str
-    content: str
+    content: Optional[str] = ""
+    is_folder: Optional[bool] = False
 
 class FileOperationRequest(BaseModel):
     path: str
-    is_folder: bool = False
+    is_folder: Optional[bool] = False
 
 class GitPushRequest(BaseModel):
-    commit_message: str
+    commit_message: Optional[str] = None
+    message: Optional[str] = None
     branch: Optional[str] = "main"
+
+class CredentialsUpdate(BaseModel):
+    username: str
+    password: str
 
 class DockerBuildRequest(BaseModel):
     image_name: str

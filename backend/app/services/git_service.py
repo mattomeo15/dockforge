@@ -147,6 +147,29 @@ class GitService:
             raise err
 
     @staticmethod
+    def create_folder(folder_path: str) -> None:
+        """Create a directory in workspace recursively."""
+        target_dir = (WORKSPACE_DIR / folder_path).resolve()
+        if not target_dir.is_relative_to(WORKSPACE_DIR.resolve()):
+            raise ValueError("Invalid target path")
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as err:
+            logger.error(f"Error creating folder {folder_path}: {err}")
+            raise err
+
+    @staticmethod
+    def clear_workspace() -> None:
+        """Clear all files in workspace directory."""
+        try:
+            if WORKSPACE_DIR.exists():
+                shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
+            WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as err:
+            logger.error(f"Error clearing workspace: {err}")
+            raise err
+
+    @staticmethod
     def delete_path(rel_path: str) -> None:
         """Delete a file or directory in workspace."""
         target = (WORKSPACE_DIR / rel_path).resolve()

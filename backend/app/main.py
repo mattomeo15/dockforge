@@ -13,7 +13,7 @@ from backend.app.models import (
     UserDB, SettingsDB, BuildJobDB,
     UserLogin, TokenResponse, SettingsSchema, TestConnectionRequest,
     RepoPullRequest, FileContentRequest, FileOperationRequest,
-    GitPushRequest, DockerBuildRequest, DockerHubTagRequest
+    GitPushRequest, DockerBuildRequest, DockerHubTagRequest, CredentialsUpdate
 )
 from backend.app.services.auth_service import (
     verify_password, get_password_hash, create_access_token, get_current_user
@@ -68,6 +68,80 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 def get_me(current_user: UserDB = Depends(get_current_user)):
     return {"username": current_user.username, "created_at": current_user.created_at.isoformat()}
 
+@app.get("/api/auth/credentials")
+def get_credentials(current_user: UserDB = Depends(get_current_user)):
+    return {"username": current_user.username}
+
+@app.post("/api/auth/credentials")
+def update_credentials(payload: CredentialsUpdate, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    if payload.username and payload.username.strip():
+        new_un = payload.username.strip()
+        existing = db.query(UserDB).filter(UserDB.username == new_un, UserDB.id != current_user.id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Username is already in use.")
+        current_user.username = new_un
+    if payload.password and payload.password.strip():
+        current_user.hashed_password = get_password_hash(payload.password.strip())
+    db.commit()
+    return {"status": "success", "message": "Credentials updated successfully", "username": current_user.username}
+
+# GitHub Repos Endpoint
+@app.get("/api/github/repos")
+async def get_github_repos(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    settings = db.query(SettingsDB).first()
+    token = settings.github_token.strip() if (settings and settings.github_token) else None
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub Personal Access Token not configured in Settings.")
+    
+    current_repo = None
+    try:
+        import subprocess
+        from backend.app.services.git_service import WORKSPACE_DIR
+        proc = subprocess.run(["git", "remote", "get-url", "origin"], cwd=WORKSPACE_DIR, capture_output=True, text=True)
+        if proc.returncode == 0:
+            current_repo = proc.stdout.strip()
+    except Exception:
+        pass
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        try:
+            res = await client.get(
+                "https://api.github.com/user/repos?sort=updated&per_page=100",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "User-Agent": "DockForge",
+                    "Accept": "application/vnd.github+json"
+                },
+                timeout=10.0
+            )
+            if res.status_code != 200:
+                err_msg = "Failed to fetch repositories from GitHub API"
+                try:
+                    err_data = res.json()
+                    if isinstance(err_data, dict) and err_data.get("message"):
+                        err_msg = err_data.get("message")
+                except Exception:
+                    pass
+                raise HTTPException(status_code=res.status_code, detail=err_msg)
+
+            repos_data = res.json()
+            repos = [
+                {
+                    "name": r.get("name"),
+                    "full_name": r.get("full_name"),
+                    "clone_url": r.get("clone_url"),
+                    "private": bool(r.get("private")),
+                    "default_branch": r.get("default_branch", "main")
+                }
+                for r in repos_data
+            ]
+            return {"repos": repos, "current_repo": current_repo}
+        except HTTPException:
+            raise
+        except Exception as err:
+            raise HTTPException(status_code=500, detail=str(err))
+
 # Settings Routes
 @app.get("/api/settings")
 def get_settings(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
@@ -100,7 +174,6 @@ def update_settings(payload: SettingsSchema, db: Session = Depends(get_db), curr
     # Handle optional account credentials update
     if payload.new_username and payload.new_username.strip():
         new_un = payload.new_username.strip()
-        # Check if username is taken by another user
         existing = db.query(UserDB).filter(UserDB.username == new_un, UserDB.id != current_user.id).first()
         if existing:
             raise HTTPException(status_code=400, detail="Username is already in use.")
@@ -151,6 +224,7 @@ def pull_repository(payload: RepoPullRequest, db: Session = Depends(get_db), cur
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/files/tree")
 @app.get("/api/workspace/tree")
 def get_file_tree(current_user: UserDB = Depends(get_current_user)):
     return GitService.get_file_tree()
@@ -163,38 +237,84 @@ def read_file(path: str, current_user: UserDB = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+@app.post("/api/files/create")
 @app.post("/api/workspace/file")
-def save_file(payload: FileContentRequest, current_user: UserDB = Depends(get_current_user)):
+def create_or_save_file(payload: FileContentRequest, current_user: UserDB = Depends(get_current_user)):
     try:
-        GitService.write_file(payload.path, payload.content)
-        return {"status": "success", "message": f"Saved {payload.path}"}
+        if payload.is_folder:
+            GitService.create_folder(payload.path)
+            return {"status": "success", "message": f"Folder created: {payload.path}"}
+        else:
+            GitService.write_file(payload.path, payload.content or "")
+            return {"status": "success", "message": f"Saved {payload.path}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/files/mkdir")
+def create_folder_route(payload: FileOperationRequest, current_user: UserDB = Depends(get_current_user)):
+    try:
+        GitService.create_folder(payload.path)
+        return {"status": "success", "message": f"Folder created: {payload.path}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/files/delete")
 @app.delete("/api/workspace/file")
-def delete_file(path: str, current_user: UserDB = Depends(get_current_user)):
+def delete_file_route(path: str, current_user: UserDB = Depends(get_current_user)):
     try:
         GitService.delete_path(path)
         return {"status": "success", "message": f"Deleted {path}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/workspace/clear")
+@app.delete("/api/workspace/clear")
+def clear_workspace_route(current_user: UserDB = Depends(get_current_user)):
+    try:
+        GitService.clear_workspace()
+        return {"status": "success", "message": "Workspace cleared successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/git/push")
 @app.post("/api/repo/push")
 def push_to_github(payload: GitPushRequest, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     settings = db.query(SettingsDB).first()
     gh_token = settings.github_token if settings else None
+    msg = payload.commit_message or payload.message or "Update from DockForge"
 
     try:
-        res = GitService.push_to_github(payload.commit_message, payload.branch or "main", gh_token)
+        res = GitService.push_to_github(msg, payload.branch or "main", gh_token)
         return res
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Docker Hub Tags Route
+# Docker Hub Routes
+@app.get("/api/dockerhub/repos")
+async def fetch_dockerhub_repos(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    settings = db.query(SettingsDB).first()
+    dh_user = settings.dockerhub_username.strip() if (settings and settings.dockerhub_username) else None
+    dh_token = settings.dockerhub_token.strip() if (settings and settings.dockerhub_token) else None
+
+    if not dh_user or not dh_token:
+        raise HTTPException(status_code=400, detail="Docker Hub username and token not configured in Settings.")
+
+    try:
+        repos = await DockerHubService.fetch_user_repos(dh_user, dh_token)
+        return {"username": dh_user, "repos": repos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/dockerhub/tags")
 @app.post("/api/dockerhub/tags")
-async def fetch_dockerhub_tags(payload: DockerHubTagRequest, current_user: UserDB = Depends(get_current_user)):
-    tags = await DockerHubService.fetch_image_tags(payload.image_name)
-    return {"image_name": payload.image_name, "tags": tags}
+async def fetch_dockerhub_tags(
+    repo: Optional[str] = None,
+    payload: Optional[DockerHubTagRequest] = None,
+    current_user: UserDB = Depends(get_current_user)
+):
+    target_image = repo or (payload.image_name if payload else None) or "dockforge"
+    tags = await DockerHubService.fetch_image_tags(target_image)
+    return {"image_name": target_image, "tags": tags}
 
 # Docker Build & Push Routes
 @app.get("/api/jobs")
