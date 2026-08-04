@@ -67,12 +67,26 @@
     jobs: [],
     activeJobLogs: '',
     currentWs: null,
+    lastLocalBuild: (() => {
+      try {
+        const val = safeLocalStorageGet('dockforge_last_build');
+        return val ? JSON.parse(val) : null;
+      } catch (e) {
+        return null;
+      }
+    })(),
+    dockerLocalTagInput: 'latest',
     modals: {
       pull: false,
       push: false,
       build: false,
+      pushDocker: false,
       jobs: false,
-      settings: false
+      settings: false,
+      newFile: false,
+      newFolder: false,
+      clearWorkspace: false,
+      deleteItem: null
     },
     loading: {
       pull: false,
@@ -90,7 +104,24 @@
     terminalMaximized: false,
     mobileTab: 'code',
     mobileMenuOpen: false,
-    currentCredentials: null
+    currentCredentials: null,
+    repos: [],
+    currentRepoUrl: '',
+    pullRepoUrl: '',
+    pullBranch: 'main',
+    loadingRepos: false,
+    cloningRepo: false,
+    activeRepo: {
+      name: 'No Project Loaded',
+      full_name: '',
+      branch: 'main',
+      url: ''
+    },
+    activeProjectMenuOpen: false,
+    dockerHubRepos: [],
+    dockerHubTags: [],
+    loadingDockerHubRepos: false,
+    loadingDockerHubTags: false
   };
 
   // --- THEME MANAGEMENT & DOM UPDATES ---
@@ -133,8 +164,18 @@
 
     const res = await fetch(endpoint, { ...options, headers });
     if (res.status === 401 && endpoint !== '/api/auth/login') {
-      handleLogout();
-      throw new Error('Session expired. Please log in again.');
+      try {
+        const cloned = res.clone();
+        const data = await cloned.json();
+        if (data.code === 'UNAUTHORIZED' || data.detail === 'Access token required' || data.detail === 'Invalid or expired token') {
+          handleLogout();
+          throw new Error('Session expired. Please log in again.');
+        }
+      } catch (e) {
+        if (e.message === 'Session expired. Please log in again.') {
+          throw e;
+        }
+      }
     }
     return res;
   }
@@ -179,16 +220,22 @@
   }
 
   // --- DATA FETCHING ---
-  async function loadWorkspaceTree() {
+  async function loadWorkspaceTree(showToastOnSuccess = false) {
     if (!state.token) return;
     try {
-      const res = await apiFetch('/api/workspace/tree');
+      const res = await apiFetch('/api/files/tree');
       if (res.ok) {
         state.files = await res.json();
+        if (showToastOnSuccess) {
+          showToast('File tree refreshed');
+        }
         render();
       }
     } catch (e) {
       console.error('Failed to load file tree:', e);
+      if (showToastOnSuccess) {
+        showToast(e.message || 'Failed to refresh file tree', true);
+      }
     }
   }
 
@@ -201,10 +248,231 @@
         if (state.settings.theme) {
           applyTheme(state.settings.theme);
         }
+        if (state.settings.github_token) {
+          loadGitHubRepos();
+        }
+        if (state.settings.dockerhub_username || state.settings.docker_username) {
+          loadDockerHubRepos();
+        }
       }
     } catch (e) {
       console.error('Failed to load settings:', e);
     }
+  }
+
+  async function loadDockerHubRepos(showToastOnError = false) {
+    if (!state.token) return;
+    state.loadingDockerHubRepos = true;
+    render();
+    try {
+      const res = await apiFetch('/api/dockerhub/repos');
+      if (res.ok) {
+        const data = await res.json();
+        state.dockerHubRepos = data.repos || [];
+        if ((!state.dockerImageInput || state.dockerImageInput === 'my-username/my-service') && state.dockerHubRepos.length > 0) {
+          state.dockerImageInput = state.dockerHubRepos[0].full_name;
+        }
+        if (state.dockerImageInput) {
+          await loadDockerHubTags(state.dockerImageInput);
+        }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        if (showToastOnError && err.detail) {
+          showToast(err.detail, true);
+        }
+      }
+    } catch (e) {
+      if (showToastOnError) {
+        showToast(e.message || 'Failed to fetch Docker Hub repositories', true);
+      }
+    } finally {
+      state.loadingDockerHubRepos = false;
+      render();
+    }
+  }
+
+  async function loadDockerHubTags(repoName) {
+    if (!state.token || !repoName) return;
+    state.loadingDockerHubTags = true;
+    render();
+    try {
+      const res = await apiFetch(`/api/dockerhub/tags?repo=${encodeURIComponent(repoName)}`);
+      if (res.ok) {
+        const data = await res.json();
+        state.dockerHubTags = data.tags || [];
+        state.tagsList = (data.tags || []).map(t => typeof t === 'string' ? t : t.name);
+      }
+    } catch (e) {
+      console.warn('Failed to load tags:', e);
+    } finally {
+      state.loadingDockerHubTags = false;
+      render();
+    }
+  }
+
+  function formatProjectTitle(name) {
+    if (!name || name === 'No Project Loaded' || name === 'No Repository Loaded') {
+      return 'No Project Loaded';
+    }
+    const cleanName = name.trim();
+    if (cleanName.toLowerCase() === 'dockforge') return 'DockForge';
+    if (cleanName.toLowerCase() === 'ip-freely') return 'IP-Freely';
+
+    return cleanName
+      .split(/[-_]+/)
+      .map(part => {
+        if (!part) return '';
+        const lower = part.toLowerCase();
+        if (lower === 'ip') return 'IP';
+        if (lower === 'dockforge') return 'DockForge';
+        if (lower === 'ui') return 'UI';
+        if (lower === 'api') return 'API';
+        if (lower === 'db') return 'DB';
+        return part.charAt(0).toUpperCase() + part.slice(1);
+      })
+      .join('-');
+  }
+
+  function syncActiveRepo(urlOrFullName = null, targetBranch = null) {
+    const url = urlOrFullName !== null ? urlOrFullName : (state.currentRepoUrl || '');
+    if (!url) {
+      state.activeRepo = {
+        name: 'No Project Loaded',
+        full_name: '',
+        branch: 'main',
+        url: ''
+      };
+      return;
+    }
+
+    let fullName = '';
+    let shortName = '';
+    let branch = targetBranch || state.pullBranch || 'main';
+
+    const matchedRepo = (state.repos || []).find(r => {
+      if (!r) return false;
+      const rClone = (r.clone_url || '').toLowerCase();
+      const rFull = (r.full_name || '').toLowerCase();
+      const target = url.toLowerCase();
+      return (rClone && (target === rClone || target.includes(rClone))) ||
+             (rFull && (target === rFull || target.includes(rFull)));
+    });
+
+    if (matchedRepo) {
+      fullName = matchedRepo.full_name;
+      if (matchedRepo.name) {
+        shortName = matchedRepo.name;
+      } else if (matchedRepo.full_name.includes('/')) {
+        shortName = matchedRepo.full_name.split('/')[1];
+      } else {
+        shortName = matchedRepo.full_name;
+      }
+      if (!targetBranch && matchedRepo.default_branch) {
+        branch = matchedRepo.default_branch;
+      }
+    } else {
+      let clean = url.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+      if (clean.includes('/')) {
+        const parts = clean.split('/');
+        if (parts.length >= 2) {
+          fullName = `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+          shortName = parts[parts.length - 1];
+        } else {
+          fullName = clean;
+          shortName = clean;
+        }
+      } else {
+        fullName = clean;
+        shortName = clean;
+      }
+    }
+
+    state.activeRepo = {
+      name: shortName || 'No Project Loaded',
+      full_name: fullName,
+      branch: branch,
+      url: url
+    };
+  }
+
+  async function loadGitHubRepos(showToastOnError = false) {
+    if (!state.token) return;
+    state.loadingRepos = true;
+    render();
+    try {
+      const res = await apiFetch('/api/github/repos');
+      if (res.ok) {
+        const data = await res.json();
+        state.repos = data.repos || [];
+        if (data.current_repo) {
+          state.currentRepoUrl = data.current_repo;
+        }
+        syncActiveRepo();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        if (showToastOnError && err.detail) {
+          showToast(err.detail, true);
+        }
+      }
+    } catch (e) {
+      if (showToastOnError) {
+        showToast(e.message || 'Failed to fetch GitHub repositories', true);
+      }
+    } finally {
+      state.loadingRepos = false;
+      render();
+    }
+  }
+
+  async function switchRepository(repoUrl, branch = 'main', repoName = '') {
+    if (!repoUrl) return;
+    const nameToDisplay = repoName || repoUrl.split('/').pop().replace('.git', '');
+
+    if (!confirm(`Switch workspace to repository "${nameToDisplay}" (${branch})?\nThis will clone/sync the repository into your workspace directory.`)) {
+      render();
+      return;
+    }
+
+    state.cloningRepo = true;
+    showToast(`Cloning repository "${nameToDisplay}"...`);
+    render();
+
+    try {
+      const res = await apiFetch('/api/repo/pull', {
+        method: 'POST',
+        body: JSON.stringify({ url: repoUrl, branch })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || `Successfully pulled ${nameToDisplay}`);
+        state.openTabs = [];
+        state.activeTabPath = null;
+        state.currentRepoUrl = repoUrl;
+        state.pullRepoUrl = repoUrl;
+        state.pullBranch = branch;
+        syncActiveRepo(repoUrl, branch);
+        await loadWorkspaceTree();
+        await loadGitHubRepos();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Failed to pull repository', true);
+      }
+    } catch (e) {
+      showToast(e.message || 'Error pulling repository', true);
+    } finally {
+      state.cloningRepo = false;
+      render();
+    }
+  }
+
+  function isCurrentRepo(repo) {
+    if (!repo) return false;
+    const cur = (state.currentRepoUrl || (state.activeRepo && state.activeRepo.url) || '').toLowerCase();
+    const activeFull = (state.activeRepo && state.activeRepo.full_name || '').toLowerCase();
+    const fullName = repo.full_name ? repo.full_name.toLowerCase() : '';
+    const cloneUrl = repo.clone_url ? repo.clone_url.toLowerCase() : '';
+    return (fullName && (cur.includes(fullName) || activeFull === fullName)) || (cloneUrl && cur === cloneUrl);
   }
 
   async function loadJobs() {
@@ -280,48 +548,18 @@
   }
 
   async function createNewItem(isFolder) {
-    const itemName = prompt(`Enter new ${isFolder ? 'folder' : 'file'} path relative to workspace root (e.g. src/app.py):`);
-    if (!itemName || !itemName.trim()) return;
-
-    try {
-      const res = await apiFetch('/api/workspace/file', {
-        method: 'POST',
-        body: JSON.stringify({ path: itemName.trim(), content: '', is_folder: isFolder })
-      });
-      if (res.ok) {
-        await loadWorkspaceTree();
-        if (!isFolder) {
-          openFile(itemName.trim());
-        }
-      } else {
-        const err = await res.json();
-        alert(`Creation failed: ${err.detail}`);
-      }
-    } catch (e) {
-      alert(`Error: ${e.message}`);
+    if (isFolder) {
+      state.modals.newFolder = true;
+    } else {
+      state.modals.newFile = true;
     }
+    render();
   }
 
-  async function deleteFile(filePath) {
-    if (!confirm(`Are you sure you want to delete '${filePath}'?`)) return;
-
-    try {
-      const res = await apiFetch(`/api/workspace/file?path=${encodeURIComponent(filePath)}`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        state.openTabs = state.openTabs.filter(t => t.path !== filePath);
-        if (state.activeTabPath === filePath) {
-          state.activeTabPath = state.openTabs.length ? state.openTabs[0].path : null;
-        }
-        await loadWorkspaceTree();
-      } else {
-        const err = await res.json();
-        alert(`Deletion failed: ${err.detail}`);
-      }
-    } catch (e) {
-      alert(`Error: ${e.message}`);
-    }
+  async function deleteFile(filePath, isFolder = false) {
+    if (!filePath) return;
+    state.modals.deleteItem = { path: filePath, isFolder };
+    render();
   }
 
   // --- WEBSOCKET LOG STREAMING ---
@@ -349,7 +587,21 @@
     };
 
     ws.onclose = () => {
-      state.activeJobLogs += `\n[${new Date().toLocaleTimeString()}] Stream closed. Job execution complete.\n`;
+      state.activeJobLogs += `\n[${new Date().toLocaleTimeString()}] Stream closed. Execution complete.\n`;
+      if (state.activeJobLogs.includes('GIT PUSH FINISHED SUCCESSFULLY')) {
+        showToast('Git Push completed successfully!');
+      } else if (state.activeJobLogs.includes('Git Push Failed') || state.activeJobLogs.includes('Push Rejected') || state.activeJobLogs.includes('💥 Error: /workspace is not a Git repository')) {
+        showToast('Git Push failed. Check Build Console for details.', true);
+      } else if (state.activeJobLogs.includes('LOCAL DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('BUILD & PUSH JOB FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully built local image')) {
+        state.lastLocalBuild = {
+          ready: true,
+          imageName: 'dockforge',
+          tag: state.dockerLocalTagInput || 'latest',
+          timestamp: new Date().toLocaleTimeString()
+        };
+        safeLocalStorageSet('dockforge_last_build', JSON.stringify(state.lastLocalBuild));
+        showToast(`Local Docker build ready (${state.lastLocalBuild.tag})!`);
+      }
       loadJobs();
       render();
     };
@@ -487,33 +739,69 @@
               <img src="/frontend/public/logo.png" alt="DockForge Logo" class="h-7 w-7 object-contain" onerror="this.onerror=null; this.src='/public/logo.png';" />
               <span class="font-bold text-base md:text-lg dark:text-white text-slate-900 tracking-wide">DockForge</span>
             </div>
+
+            <div class="h-4 w-px dark:bg-slate-800 bg-slate-200 mx-1 hidden sm:block"></div>
+
+            <!-- HEADER ACTIVE PROJECT BADGE -->
+            <div class="px-3 py-1.5 rounded-lg border dark:border-slate-700 border-slate-300 dark:bg-slate-800 bg-slate-100 text-xs font-bold flex items-center space-x-2 transition shadow-sm" title="Active Project">
+              <span class="w-2 h-2 rounded-full ${state.activeRepo && state.activeRepo.full_name ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'} shrink-0"></span>
+              <span class="font-extrabold text-xs md:text-sm tracking-wide dark:text-amber-400 text-amber-600 truncate max-w-[150px] sm:max-w-[220px] md:max-w-[280px]">
+                ${escapeHtml(formatProjectTitle(state.activeRepo && state.activeRepo.name ? state.activeRepo.name : 'No Project Loaded'))}
+              </span>
+            </div>
           </div>
 
           <!-- Desktop Navigation Actions -->
           <div class="hidden md:flex items-center space-x-2 shrink-0">
-            <button id="btn-pull" class="px-3 py-1.5 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1.5 transition">
-              <i class="fa-solid fa-download text-blue-500"></i>
-              <span>Pull Repo</span>
-            </button>
 
-            <button id="btn-push" class="px-3 py-1.5 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1.5 transition">
-              <i class="fa-solid fa-code-commit text-emerald-500"></i>
-              <span>Push Git</span>
-            </button>
+            <!-- Git Actions Group -->
+            <div class="flex items-center space-x-1.5 p-1 rounded-xl bg-slate-800/60 dark:bg-slate-950/60 border dark:border-slate-800 border-slate-300/80 shadow-sm">
+              <button id="btn-pull" class="px-2.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-lg border border-slate-700/80 flex items-center space-x-1.5 transition shadow-sm cursor-pointer" title="Git Pull Repository">
+                <i class="fa-solid fa-code-branch text-blue-400 text-xs"></i>
+                <span>Git Pull</span>
+              </button>
 
-            <button id="btn-build" class="px-3 py-1.5 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-sm flex items-center space-x-1.5 transition">
-              <i class="fa-solid fa-cube"></i>
-              <span>Build Docker</span>
-            </button>
+              <button id="btn-push" class="px-2.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-lg border border-slate-700/80 flex items-center space-x-1.5 transition shadow-sm cursor-pointer" title="Git Push / Commit Changes">
+                <i class="fa-solid fa-code-commit text-emerald-400 text-xs"></i>
+                <span>Git Push</span>
+              </button>
+            </div>
 
-            <button id="btn-jobs" class="px-3 py-1.5 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1.5 transition">
+            <!-- Thin Vertical Divider Line between Git and Docker groups -->
+            <div class="h-6 w-px dark:bg-slate-700/80 bg-slate-300 mx-1 shrink-0"></div>
+
+            <!-- Docker Container/Image Actions Group -->
+            <div class="flex items-center space-x-1.5 p-1 rounded-xl bg-blue-950/20 dark:bg-blue-950/40 border dark:border-blue-900/40 border-blue-200 shadow-sm">
+              <button id="btn-build-image" class="px-2.5 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-sm flex items-center space-x-1.5 transition border border-blue-500/30 cursor-pointer" title="Build Docker Container Image">
+                <i class="fa-solid fa-layer-group text-blue-200 text-xs"></i>
+                <span>Image Build</span>
+              </button>
+
+              <button id="btn-push-docker" class="px-2.5 py-1.5 text-xs font-semibold ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm border border-indigo-500/30' : 'bg-indigo-600/85 hover:bg-indigo-600 text-white/90 border border-indigo-500/30'} rounded-lg flex items-center space-x-1.5 transition cursor-pointer" title="Push Docker Image to Registry">
+                <i class="fa-solid fa-rocket text-indigo-200 text-xs"></i>
+                <span>Image Push</span>
+              </button>
+            </div>
+
+            <!-- Status Indicator Badge -->
+            ${state.lastLocalBuild && state.lastLocalBuild.ready ? `
+              <div class="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center space-x-1.5 shrink-0" title="Local build ready: ${escapeHtml(state.lastLocalBuild.tag)}">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+                <span class="truncate">Build Ready: <strong class="font-mono">${escapeHtml(state.lastLocalBuild.tag)}</strong></span>
+              </div>
+            ` : `
+              <div class="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-slate-500/10 dark:text-slate-400 text-slate-500 border border-slate-500/20 flex items-center space-x-1.5 shrink-0" title="No active local image build">
+                <span class="w-2 h-2 rounded-full bg-slate-400 shrink-0"></span>
+                <span>No Active Build</span>
+              </div>
+            `}
+
+            <button id="btn-jobs" class="p-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1 transition" title="Build & Push Jobs">
               <i class="fa-solid fa-list-check text-purple-500"></i>
-              <span>Jobs</span>
             </button>
 
-            <button id="btn-settings" class="px-3 py-1.5 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1.5 transition">
+            <button id="btn-settings" class="p-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1 transition" title="Settings">
               <i class="fa-solid fa-gear text-amber-500"></i>
-              <span>Settings</span>
             </button>
 
             <div class="h-4 w-px dark:bg-slate-800 bg-slate-200 mx-1"></div>
@@ -534,19 +822,40 @@
         <!-- Mobile Collapsible Menu Drawer -->
         ${state.mobileMenuOpen ? `
           <div class="md:hidden border-t dark:border-slate-800 border-slate-200 dark:bg-slate-900/95 bg-slate-100/95 backdrop-blur-md p-3 grid grid-cols-2 gap-2 text-xs shadow-xl transition-all">
-            <button id="btn-pull-mobile" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95">
-              <i class="fa-solid fa-download text-blue-500 text-sm"></i>
-              <span class="font-medium">Pull Repo</span>
+            <!-- Mobile Local Build Status Badge -->
+            <div class="col-span-2 p-2 rounded-lg dark:bg-slate-800/80 bg-white border dark:border-slate-700 border-slate-300 flex items-center justify-between text-xs">
+              <span class="font-medium text-slate-400">Local Build:</span>
+              ${state.lastLocalBuild && state.lastLocalBuild.ready ? `
+                <span class="text-emerald-500 font-semibold flex items-center space-x-1">
+                  <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>Ready (${escapeHtml(state.lastLocalBuild.tag)})</span>
+                </span>
+              ` : `
+                <span class="text-slate-500 flex items-center space-x-1">
+                  <span class="w-2 h-2 rounded-full bg-slate-400"></span>
+                  <span>No Active Build</span>
+                </span>
+              `}
+            </div>
+
+            <button id="btn-pull-mobile" class="p-2.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 flex items-center space-x-2 hover:bg-slate-700 transition active:scale-95">
+              <i class="fa-solid fa-code-branch text-blue-400 text-sm"></i>
+              <span class="font-medium">Git Pull</span>
             </button>
 
-            <button id="btn-push-mobile" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95">
-              <i class="fa-solid fa-code-commit text-emerald-500 text-sm"></i>
-              <span class="font-medium">Push Git</span>
+            <button id="btn-push-mobile" class="p-2.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 flex items-center space-x-2 hover:bg-slate-700 transition active:scale-95">
+              <i class="fa-solid fa-code-commit text-emerald-400 text-sm"></i>
+              <span class="font-medium">Git Push</span>
             </button>
 
-            <button id="btn-build-mobile" class="p-2.5 rounded-lg bg-blue-600 text-white flex items-center space-x-2 shadow-sm hover:bg-blue-500 transition active:scale-95">
-              <i class="fa-solid fa-cube text-sm"></i>
-              <span class="font-medium">Build Docker</span>
+            <button id="btn-build-image-mobile" class="p-2.5 rounded-lg bg-blue-600 text-white flex items-center space-x-2 shadow-sm hover:bg-blue-500 transition active:scale-95">
+              <i class="fa-solid fa-layer-group text-blue-200 text-sm"></i>
+              <span class="font-medium">Image Build</span>
+            </button>
+
+            <button id="btn-push-docker-mobile" class="p-2.5 rounded-lg ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-indigo-600 text-white' : 'bg-indigo-600/80 text-white/90'} flex items-center space-x-2 shadow-sm hover:bg-indigo-500 transition active:scale-95">
+              <i class="fa-solid fa-rocket text-indigo-200 text-sm"></i>
+              <span class="font-medium">Image Push</span>
             </button>
 
             <button id="btn-jobs-mobile" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95">
@@ -601,6 +910,22 @@
   function renderSidebar() {
     return `
       <aside class="w-full h-full dark:bg-slate-900 bg-slate-50 dark:border-slate-800 border-slate-200 flex flex-col shrink-0 select-none md:border-r">
+        <!-- FULL REPOSITORY SUB-HEADER IN SIDEBAR -->
+        <div class="px-3 py-2 border-b dark:border-slate-800 border-slate-200 dark:bg-slate-950/60 bg-slate-100/80 flex items-center justify-between text-xs">
+          <div class="flex items-center space-x-1.5 truncate min-w-0 pr-1">
+            <i class="fa-brands fa-github text-slate-400 shrink-0 text-xs"></i>
+            <span class="font-mono font-bold dark:text-slate-200 text-slate-800 truncate text-xs" title="${escapeHtml(state.activeRepo && state.activeRepo.full_name ? state.activeRepo.full_name : 'No Repository Loaded')}">
+              ${escapeHtml(state.activeRepo && state.activeRepo.full_name ? state.activeRepo.full_name : 'No Repository Loaded')}
+            </span>
+          </div>
+          ${state.activeRepo && state.activeRepo.branch && state.activeRepo.full_name ? `
+            <span class="px-1.5 py-0.5 text-[10px] font-mono rounded bg-blue-500/10 text-blue-500 dark:text-blue-400 border border-blue-500/20 shrink-0 flex items-center space-x-1" title="Active Branch">
+              <i class="fa-solid fa-code-branch text-[9px]"></i>
+              <span>${escapeHtml(state.activeRepo.branch)}</span>
+            </span>
+          ` : ''}
+        </div>
+
         <div class="p-3 border-b dark:border-slate-800 border-slate-200 flex items-center justify-between text-slate-400">
           <span class="text-xs font-semibold uppercase tracking-wider dark:text-slate-400 text-slate-600">Workspace Files</span>
           <div class="flex items-center space-x-1">
@@ -612,6 +937,9 @@
             </button>
             <button id="btn-refresh-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition" title="Refresh Tree">
               <i class="fa-solid fa-arrows-rotate text-xs"></i>
+            </button>
+            <button id="btn-clear-tree" class="p-1 dark:hover:text-red-400 hover:text-red-600 text-slate-400 rounded transition" title="Clear Workspace">
+              <i class="fa-solid fa-eraser text-xs"></i>
             </button>
           </div>
         </div>
@@ -639,11 +967,14 @@
         return `
           <div>
             <div class="flex items-center justify-between px-2 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 dark:text-slate-300 text-slate-700 dark:hover:text-white hover:text-slate-900 cursor-pointer group"
-                 style="padding-left: ${paddingLeft}" data-folder-path="${node.path}">
-              <div class="flex items-center space-x-1.5 truncate">
-                <i class="fa-solid ${isExpanded ? 'fa-folder-open text-amber-400' : 'fa-folder text-amber-500'}"></i>
-                <span class="truncate font-medium">${node.name}</span>
+                 style="padding-left: ${paddingLeft}" data-folder-path="${escapeHtml(node.path)}">
+              <div class="flex items-center space-x-1.5 truncate pr-2 min-w-0">
+                <i class="fa-solid ${isExpanded ? 'fa-folder-open text-amber-400' : 'fa-folder text-amber-500'} shrink-0"></i>
+                <span class="truncate font-medium">${escapeHtml(node.name)}</span>
               </div>
+              <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition shrink-0" data-delete-path="${escapeHtml(node.path)}" data-is-folder="true" title="Delete Folder">
+                <i class="fa-solid fa-xmark"></i>
+              </button>
             </div>
             ${isExpanded ? renderTreeNodes(node.children, depth + 1) : ''}
           </div>
@@ -663,12 +994,12 @@
 
       return `
         <div class="flex items-center justify-between px-2 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 cursor-pointer group ${isActive ? 'bg-blue-600/20 text-blue-600 dark:text-blue-400 font-semibold' : 'dark:text-slate-400 text-slate-600 dark:hover:text-slate-200 hover:text-slate-900'}"
-             style="padding-left: ${paddingLeft}" data-file-path="${node.path}">
-          <div class="flex items-center space-x-2 truncate">
-            <i class="fa-solid ${icon}"></i>
-            <span class="truncate">${node.name}</span>
+             style="padding-left: ${paddingLeft}" data-file-path="${escapeHtml(node.path)}">
+          <div class="flex items-center space-x-2 truncate pr-2 min-w-0">
+            <i class="fa-solid ${icon} shrink-0"></i>
+            <span class="truncate">${escapeHtml(node.name)}</span>
           </div>
-          <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition" data-delete-path="${node.path}" title="Delete File">
+          <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition shrink-0" data-delete-path="${escapeHtml(node.path)}" data-is-folder="false" title="Delete File">
             <i class="fa-solid fa-xmark"></i>
           </button>
         </div>
@@ -891,12 +1222,149 @@
       ${state.modals.pull ? renderPullModal() : ''}
       ${state.modals.push ? renderPushModal() : ''}
       ${state.modals.build ? renderBuildModal() : ''}
+      ${state.modals.pushDocker ? renderPushDockerModal() : ''}
       ${state.modals.jobs ? renderJobsModal() : ''}
       ${state.modals.settings ? renderSettingsModal() : ''}
+      ${state.modals.newFile ? renderNewFileModal() : ''}
+      ${state.modals.newFolder ? renderNewFolderModal() : ''}
+      ${state.modals.clearWorkspace ? renderClearWorkspaceModal() : ''}
+      ${state.modals.deleteItem ? renderDeleteItemModal() : ''}
+    `;
+  }
+
+  function renderNewFileModal() {
+    return `
+      <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
+        <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
+              <i class="fa-solid fa-file-circle-plus text-blue-500"></i>
+              <span>Create New File</span>
+            </h3>
+            <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <form id="form-new-file" class="space-y-4">
+            <div>
+              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">File Path</label>
+              <input type="text" id="input-new-file-path" required placeholder="e.g. src/index.js, Dockerfile, styles.css" autofocus
+                     class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+              <p class="text-[11px] dark:text-slate-400 text-slate-500 mt-1">Relative path to workspace root.</p>
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+              <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
+              <button type="submit" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-plus text-xs"></i>
+                <span>Create File</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderNewFolderModal() {
+    return `
+      <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
+        <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
+              <i class="fa-solid fa-folder-plus text-amber-500"></i>
+              <span>Create New Folder</span>
+            </h3>
+            <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <form id="form-new-folder" class="space-y-4">
+            <div>
+              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Folder Path</label>
+              <input type="text" id="input-new-folder-path" required placeholder="e.g. src/components, public/assets" autofocus
+                     class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none" />
+              <p class="text-[11px] dark:text-slate-400 text-slate-500 mt-1">Relative path to workspace root.</p>
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+              <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
+              <button type="submit" class="px-4 py-2 text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-plus text-xs"></i>
+                <span>Create Folder</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderDeleteItemModal() {
+    const item = state.modals.deleteItem;
+    if (!item || !item.path) return '';
+    const name = item.path.split('/').pop() || item.path;
+    const isFolder = !!item.isFolder;
+
+    return `
+      <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
+        <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
+              <i class="fa-solid fa-triangle-exclamation text-red-500"></i>
+              <span>Delete ${isFolder ? 'Folder' : 'File'}</span>
+            </h3>
+            <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="space-y-4">
+            <p class="text-xs dark:text-slate-300 text-slate-700">
+              Are you sure you want to delete <strong class="font-mono text-red-400">${escapeHtml(name)}</strong>?
+              ${isFolder ? 'All contents within this folder will be permanently removed.' : 'This action cannot be undone.'}
+            </p>
+            <div class="p-2.5 rounded-lg dark:bg-slate-800 bg-slate-100 font-mono text-xs dark:text-slate-400 text-slate-600 truncate">
+              Path: ${escapeHtml(item.path)}
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+              <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
+              <button type="button" id="btn-confirm-delete-item" class="px-4 py-2 text-xs font-medium bg-red-600 hover:bg-red-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-trash-can text-xs"></i>
+                <span>Delete Permanently</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderClearWorkspaceModal() {
+    return `
+      <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
+        <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
+              <i class="fa-solid fa-trash-can text-red-500"></i>
+              <span>Clear Workspace</span>
+            </h3>
+            <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <div class="space-y-4">
+            <p class="text-xs dark:text-slate-300 text-slate-700">
+              Are you sure you want to delete <strong class="text-red-400">ALL files and folders</strong> in the workspace?
+            </p>
+            <div class="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-400">
+              This action will permanently wipe all local files and reset your workspace tree.
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+              <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
+              <button type="button" id="btn-confirm-clear-workspace" class="px-4 py-2 text-xs font-medium bg-red-600 hover:bg-red-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-broom text-xs"></i>
+                <span>Wipe Workspace</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     `;
   }
 
   function renderPullModal() {
+    const defaultUrl = state.pullRepoUrl || state.currentRepoUrl || '';
+    const defaultBranch = state.pullBranch || 'main';
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
         <div class="w-full max-w-lg dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
@@ -909,19 +1377,42 @@
           </div>
           <form id="form-pull" class="space-y-4">
             <div>
+              <div class="flex items-center justify-between mb-2">
+                <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider">Select Saved Repository</label>
+                <div class="flex items-center space-x-2">
+                  ${(state.repos || []).length > 0 ? `<span class="text-[11px] text-blue-500 dark:text-blue-400 font-medium">${state.repos.length} Repositories</span>` : ''}
+                  <button type="button" id="btn-refresh-pull-repos" class="p-1 text-slate-400 hover:text-blue-500 transition" title="Refresh GitHub Repositories">
+                    <i class="fa-solid fa-arrows-rotate text-xs ${state.loadingRepos ? 'animate-spin text-blue-500' : ''}"></i>
+                  </button>
+                </div>
+              </div>
+              <select id="select-pull-repo" class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                <option value="">-- Choose from your GitHub repositories --</option>
+                ${(state.repos || []).map(r => {
+                  const active = isCurrentRepo(r);
+                  const icon = r.private ? '🔒' : '🌐';
+                  return `<option value="${escapeHtml(r.clone_url)}" data-branch="${escapeHtml(r.default_branch || 'main')}" ${active ? 'selected' : ''}>
+                    ${icon} ${escapeHtml(r.full_name)}
+                  </option>`;
+                }).join('')}
+              </select>
+            </div>
+
+            <div>
               <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Repository URL</label>
-              <input type="url" id="pull-url" required placeholder="https://github.com/username/repository.git"
+              <input type="url" id="pull-url" value="${escapeHtml(defaultUrl)}" required placeholder="https://github.com/username/repository.git"
                      class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
             </div>
             <div>
               <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Branch</label>
-              <input type="text" id="pull-branch" value="main" required
+              <input type="text" id="pull-branch" value="${escapeHtml(defaultBranch)}" required
                      class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
             </div>
             <p class="text-[11px] dark:text-slate-400 text-slate-500">Private repositories automatically utilize your saved GitHub PAT from Settings.</p>
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
-              <button type="submit" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5">
+              <button type="submit" id="btn-submit-pull" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-download text-xs"></i>
                 <span>Pull Repo</span>
               </button>
             </div>
@@ -955,7 +1446,8 @@
             </div>
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
-              <button type="submit" class="px-4 py-2 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg">
+              <button type="submit" class="px-4 py-2 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-code-commit text-xs"></i>
                 <span>Commit & Push</span>
               </button>
             </div>
@@ -968,35 +1460,128 @@
   function renderBuildModal() {
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
-        <div class="w-full max-w-lg dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+        <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
-              <i class="fa-solid fa-cube text-blue-500"></i>
-              <span>Build & Push Docker Image</span>
+              <i class="fa-solid fa-box text-blue-500"></i>
+              <span>Build Local Docker Image</span>
             </h3>
             <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
           </div>
-          <form id="form-build" class="space-y-4">
+
+          <form id="form-build-image" class="space-y-4">
             <div>
-              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Docker Image Name</label>
-              <input type="text" id="build-image" value="${escapeHtml(state.dockerImageInput)}" required placeholder="username/repository"
+              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Local Image Tag</label>
+              <input type="text" id="build-local-tag" value="${escapeHtml(state.dockerLocalTagInput || 'latest')}" required placeholder="e.g. latest, dev-build"
                      class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
             </div>
+
+            <div class="p-3 rounded-lg dark:bg-slate-800/60 bg-slate-100 border dark:border-slate-700/60 border-slate-200 text-xs dark:text-slate-300 text-slate-600 space-y-1">
+              <p class="font-medium text-slate-300">Build Details:</p>
+              <ul class="list-disc list-inside space-y-0.5 text-[11px] text-slate-400">
+                <li>Local Tag: <span class="font-mono text-blue-400">dockforge:${escapeHtml(state.dockerLocalTagInput || 'latest')}</span></li>
+                <li>Context: Workspace Root Directory</li>
+                <li>Logs stream directly to Build Console in real-time.</li>
+              </ul>
+            </div>
+
+            <div class="flex justify-end space-x-2 pt-2">
+              <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
+              <button type="submit" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-play text-xs"></i>
+                <span>Build Local Image</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPushDockerModal() {
+    const dhUser = state.settings?.dockerhub_username || state.settings?.docker_username || '';
+    const lastBuildTag = state.lastLocalBuild?.tag || 'latest';
+
+    return `
+      <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
+        <div class="w-full max-w-lg dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
+              <i class="fa-solid fa-cloud-arrow-up text-purple-500"></i>
+              <span>Push Image to Docker Hub</span>
+            </h3>
+            <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+
+          <!-- Active Local Build Banner -->
+          <div class="p-3 mb-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs">
+            <div class="flex items-center space-x-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+              <span class="dark:text-emerald-300 text-emerald-800 font-medium">Source Image: <strong class="font-mono">dockforge:${escapeHtml(lastBuildTag)}</strong></span>
+            </div>
+            <span class="text-[11px] text-emerald-400/80 font-mono">Ready for registry upload</span>
+          </div>
+
+          ${dhUser ? `
+            <div class="p-2.5 mb-4 rounded-lg dark:bg-slate-800/80 bg-slate-100 border dark:border-slate-700/60 border-slate-200 flex items-center justify-between text-xs">
+              <div class="flex items-center space-x-2 truncate">
+                <i class="fa-brands fa-docker text-blue-400 text-sm shrink-0"></i>
+                <span class="font-medium dark:text-slate-200 text-slate-800 truncate">Docker Hub: <strong class="text-blue-500">${escapeHtml(dhUser)}</strong></span>
+              </div>
+              <button type="button" id="btn-refresh-push-dh-repos" class="p-1.5 dark:hover:bg-slate-700 hover:bg-slate-200 rounded text-slate-400 hover:text-blue-500 transition shrink-0" title="Refresh Docker Hub Repositories">
+                <i class="fa-solid fa-arrows-rotate text-xs ${state.loadingDockerHubRepos ? 'animate-spin text-blue-500' : ''}"></i>
+              </button>
+            </div>
+          ` : `
+            <div class="p-2.5 mb-4 rounded-lg dark:bg-amber-950/30 bg-amber-50 border dark:border-amber-800/50 border-amber-200 text-xs dark:text-amber-300 text-amber-800">
+              Configure Docker Hub credentials in Settings to enable automatic repository syncing.
+            </div>
+          `}
+
+          <form id="form-push-docker" class="space-y-4">
             <div>
-              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Tag</label>
+              <div class="flex items-center justify-between mb-2">
+                <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider">Target Docker Hub Repository</label>
+                ${state.dockerHubRepos.length > 0 ? `<span class="text-[11px] text-purple-400 font-medium">${state.dockerHubRepos.length} Repositories Available</span>` : ''}
+              </div>
+              ${state.dockerHubRepos && state.dockerHubRepos.length > 0 ? `
+                <select id="select-push-dockerhub-repo" class="w-full px-3 py-2 mb-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none cursor-pointer">
+                  <option value="">-- Select Docker Hub Repository --</option>
+                  ${state.dockerHubRepos.map(r => {
+                    const selected = state.dockerImageInput === r.full_name ? 'selected' : '';
+                    const icon = r.is_private ? '🔒' : '🌐';
+                    return `<option value="${escapeHtml(r.full_name)}" ${selected}>${icon} ${escapeHtml(r.full_name)}</option>`;
+                  }).join('')}
+                </select>
+              ` : ''}
+              <input type="text" id="push-docker-repo" value="${escapeHtml(state.dockerImageInput)}" required placeholder="username/repository (e.g. user/my-app)"
+                     class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none" />
+            </div>
+
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider">Remote Tag</label>
+                ${state.loadingDockerHubTags ? `<span class="text-[11px] text-purple-400 flex items-center space-x-1"><i class="fa-solid fa-spinner animate-spin"></i> <span>Loading tags...</span></span>` : ''}
+              </div>
               <div class="flex space-x-2">
-                <input type="text" id="build-tag" value="${escapeHtml(state.dockerTagInput)}" required
-                       class="flex-1 px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                <select id="select-tag-preset" class="px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs">
-                  ${state.tagsList.map(t => `<option value="${t}">${t}</option>`).join('')}
+                <input type="text" id="push-docker-tag" value="${escapeHtml(state.dockerTagInput || lastBuildTag)}" required placeholder="e.g. latest, v1.0.0"
+                       class="flex-1 px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none" />
+                <select id="select-push-tag-preset" class="px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs cursor-pointer min-w-[120px]">
+                  <option value="">Select Tag</option>
+                  ${(state.dockerHubTags && state.dockerHubTags.length > 0 ? state.dockerHubTags.map(t => {
+                    const tagName = typeof t === 'string' ? t : t.name;
+                    return `<option value="${escapeHtml(tagName)}">${escapeHtml(tagName)}</option>`;
+                  }) : state.tagsList.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`)).join('')}
                 </select>
               </div>
             </div>
-            <p class="text-[11px] dark:text-slate-400 text-slate-500">Triggers a host Docker build and publishes image directly to Docker Hub with live log streaming.</p>
+
+            <p class="text-[11px] dark:text-slate-400 text-slate-500">Tags local image <span class="font-mono text-purple-400">dockforge:${escapeHtml(lastBuildTag)}</span> and pushes to selected Docker Hub repository.</p>
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
-              <button type="submit" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg">
-                <span>Start Build Job</span>
+              <button type="submit" class="px-4 py-2 text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
+                <i class="fa-solid fa-rocket text-xs"></i>
+                <span>Push Image</span>
               </button>
             </div>
           </form>
@@ -1094,9 +1679,9 @@
             <div class="pt-4 border-t dark:border-slate-800 border-slate-200">
               <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Docker Hub Credentials</label>
               <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2 items-stretch sm:items-center">
-                <input type="text" id="setting-dh-user" value="${escapeHtml(state.settings.dockerhub_username || '')}" placeholder="Username"
+                <input type="text" id="setting-dh-user" value="${escapeHtml(state.settings.dockerhub_username || state.settings.docker_username || '')}" placeholder="Username"
                        class="flex-1 px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none min-w-0" />
-                <input type="password" id="setting-dh-token" value="${escapeHtml(state.settings.dockerhub_token || '')}" placeholder="Access Token / Password"
+                <input type="password" id="setting-dh-token" value="${escapeHtml(state.settings.dockerhub_token || state.settings.docker_token || state.settings.docker_password || '')}" placeholder="Access Token / Password"
                        class="flex-1 px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none min-w-0" />
                 <button type="button" id="btn-test-dh" class="w-36 h-9 px-3 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 border dark:border-slate-700 border-slate-300 rounded-lg transition shrink-0 flex items-center justify-center space-x-1.5">
                   <i class="fa-solid fa-vial text-amber-500"></i>
@@ -1224,14 +1809,54 @@
 
   function attachEvents() {
     // Header Desktop & Mobile Buttons
-    document.getElementById('btn-pull')?.addEventListener('click', () => { state.modals.pull = true; render(); });
+    const handlePullClick = () => {
+      state.modals.pull = true;
+      if (!state.repos || state.repos.length === 0) {
+        loadGitHubRepos();
+      }
+      render();
+    };
+    document.getElementById('btn-pull')?.addEventListener('click', handlePullClick);
     document.getElementById('btn-push')?.addEventListener('click', () => { state.modals.push = true; render(); });
-    document.getElementById('btn-build')?.addEventListener('click', () => { state.modals.build = true; render(); });
+    document.getElementById('btn-build-image')?.addEventListener('click', () => { state.modals.build = true; render(); });
+    
+    const handlePushDockerClick = () => {
+      if (!state.lastLocalBuild || !state.lastLocalBuild.ready) {
+        showToast("No active local image build found. Please build a local image first.", true);
+        return;
+      }
+      state.modals.pushDocker = true;
+      if (state.dockerHubRepos.length === 0) {
+        loadDockerHubRepos();
+      }
+      render();
+    };
+    document.getElementById('btn-push-docker')?.addEventListener('click', handlePushDockerClick);
+
     document.getElementById('btn-jobs')?.addEventListener('click', () => { loadJobs(); state.modals.jobs = true; render(); });
     document.getElementById('btn-settings')?.addEventListener('click', () => { loadSettings(); state.modals.settings = true; render(); });
     document.getElementById('btn-logout')?.addEventListener('click', handleLogout);
 
-    // Mobile Header Drawer Actions
+    // Pull Repository Modal Handlers
+    document.getElementById('select-pull-repo')?.addEventListener('change', (e) => {
+      const selected = e.target.options[e.target.selectedIndex];
+      const url = selected?.value;
+      const branch = selected?.getAttribute('data-branch') || 'main';
+      if (url) {
+        const urlInput = document.getElementById('pull-url');
+        const branchInput = document.getElementById('pull-branch');
+        if (urlInput) urlInput.value = url;
+        if (branchInput) branchInput.value = branch;
+        state.pullRepoUrl = url;
+        state.pullBranch = branch;
+      }
+    });
+
+    document.getElementById('btn-refresh-pull-repos')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      loadGitHubRepos(true);
+    });
+
     document.getElementById('btn-mobile-menu')?.addEventListener('click', () => {
       state.mobileMenuOpen = !state.mobileMenuOpen;
       render();
@@ -1239,8 +1864,7 @@
 
     document.getElementById('btn-pull-mobile')?.addEventListener('click', () => {
       state.mobileMenuOpen = false;
-      state.modals.pull = true;
-      render();
+      handlePullClick();
     });
 
     document.getElementById('btn-push-mobile')?.addEventListener('click', () => {
@@ -1249,10 +1873,15 @@
       render();
     });
 
-    document.getElementById('btn-build-mobile')?.addEventListener('click', () => {
+    document.getElementById('btn-build-image-mobile')?.addEventListener('click', () => {
       state.mobileMenuOpen = false;
       state.modals.build = true;
       render();
+    });
+
+    document.getElementById('btn-push-docker-mobile')?.addEventListener('click', () => {
+      state.mobileMenuOpen = false;
+      handlePushDockerClick();
     });
 
     document.getElementById('btn-jobs-mobile')?.addEventListener('click', () => {
@@ -1291,13 +1920,24 @@
     });
 
     // Sidebar Buttons
-    document.getElementById('btn-new-file')?.addEventListener('click', () => createNewItem(false));
-    document.getElementById('btn-new-folder')?.addEventListener('click', () => createNewItem(true));
-    document.getElementById('btn-refresh-tree')?.addEventListener('click', loadWorkspaceTree);
+    document.getElementById('btn-new-file')?.addEventListener('click', () => {
+      state.modals.newFile = true;
+      render();
+    });
+    document.getElementById('btn-new-folder')?.addEventListener('click', () => {
+      state.modals.newFolder = true;
+      render();
+    });
+    document.getElementById('btn-refresh-tree')?.addEventListener('click', () => loadWorkspaceTree(true));
+    document.getElementById('btn-clear-tree')?.addEventListener('click', () => {
+      state.modals.clearWorkspace = true;
+      render();
+    });
 
     // File Tree clicks
     document.querySelectorAll('[data-folder-path]').forEach(el => {
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.btn-delete-file')) return;
         const path = el.getAttribute('data-folder-path');
         if (state.expandedFolders.has(path)) {
           state.expandedFolders.delete(path);
@@ -1318,8 +1958,14 @@
 
     document.querySelectorAll('.btn-delete-file').forEach(btn => {
       btn.addEventListener('click', (e) => {
+        e.preventDefault();
         e.stopPropagation();
-        deleteFile(btn.getAttribute('data-delete-path'));
+        const deletePath = btn.getAttribute('data-delete-path');
+        const isFolder = btn.getAttribute('data-is-folder') === 'true';
+        if (deletePath) {
+          state.modals.deleteItem = { path: deletePath, isFolder };
+          render();
+        }
       });
     });
 
@@ -1466,90 +2112,212 @@
     // Modal Close
     document.querySelectorAll('.btn-close-modal').forEach(btn => {
       btn.addEventListener('click', () => {
-        Object.keys(state.modals).forEach(k => state.modals[k] = false);
+        Object.keys(state.modals).forEach(k => {
+          if (k === 'deleteItem') {
+            state.modals[k] = null;
+          } else {
+            state.modals[k] = false;
+          }
+        });
         render();
       });
+    });
+
+    // New File Form Handler
+    document.getElementById('form-new-file')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('input-new-file-path');
+      const cleanPath = input ? input.value.trim() : '';
+      if (!cleanPath) return;
+
+      try {
+        const res = await apiFetch('/api/files/create', {
+          method: 'POST',
+          body: JSON.stringify({ path: cleanPath, content: '', is_folder: false })
+        });
+        if (res.ok) {
+          state.modals.newFile = false;
+          showToast(`File '${cleanPath}' created successfully.`);
+          await loadWorkspaceTree();
+          openFile(cleanPath);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.detail || 'Failed to create file', true);
+        }
+      } catch (err) {
+        showToast(`Error: ${err.message}`, true);
+      }
+    });
+
+    // New Folder Form Handler
+    document.getElementById('form-new-folder')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('input-new-folder-path');
+      const cleanPath = input ? input.value.trim() : '';
+      if (!cleanPath) return;
+
+      try {
+        const res = await apiFetch('/api/files/mkdir', {
+          method: 'POST',
+          body: JSON.stringify({ path: cleanPath, content: '', is_folder: true })
+        });
+        if (res.ok) {
+          state.modals.newFolder = false;
+          showToast(`Folder '${cleanPath}' created successfully.`);
+          await loadWorkspaceTree();
+        } else {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.detail || 'Failed to create folder', true);
+        }
+      } catch (err) {
+        showToast(`Error: ${err.message}`, true);
+      }
+    });
+
+    // Delete Item Confirmation Handler
+    document.getElementById('btn-confirm-delete-item')?.addEventListener('click', async () => {
+      const item = state.modals.deleteItem;
+      if (!item || !item.path) return;
+      const path = item.path;
+
+      try {
+        const res = await apiFetch(`/api/files/delete?path=${encodeURIComponent(path)}`, {
+          method: 'DELETE'
+        });
+        if (res.ok) {
+          const name = path.split('/').pop() || path;
+          state.openTabs = state.openTabs.filter(t => t.path !== path && !t.path.startsWith(path + '/'));
+          if (state.activeTabPath && (state.activeTabPath === path || state.activeTabPath.startsWith(path + '/'))) {
+            state.activeTabPath = state.openTabs.length ? state.openTabs[0].path : null;
+          }
+          state.modals.deleteItem = null;
+          showToast(`Deleted '${name}' successfully.`);
+          await loadWorkspaceTree();
+        } else {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.detail || 'Deletion failed', true);
+        }
+      } catch (err) {
+        showToast(`Error: ${err.message}`, true);
+      }
+    });
+
+    // Clear Workspace Confirmation Handler
+    document.getElementById('btn-confirm-clear-workspace')?.addEventListener('click', async () => {
+      try {
+        const res = await apiFetch('/api/workspace/clear', { method: 'DELETE' });
+        if (res.ok) {
+          state.files = [];
+          state.openTabs = [];
+          state.activeTabPath = null;
+          state.modals.clearWorkspace = false;
+          showToast('Workspace files cleared successfully.');
+          await loadWorkspaceTree();
+        } else {
+          const data = await res.json().catch(() => ({}));
+          showToast(data.detail || 'Failed to clear workspace', true);
+        }
+      } catch (err) {
+        showToast(err.message || 'Error clearing workspace', true);
+      }
     });
 
     // Modal Forms
     document.getElementById('form-pull')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const url = document.getElementById('pull-url').value;
-      const branch = document.getElementById('pull-branch').value;
+      const urlInput = document.getElementById('pull-url');
+      const branchInput = document.getElementById('pull-branch');
+      const url = urlInput ? urlInput.value.trim() : '';
+      const branch = branchInput ? branchInput.value.trim() || 'main' : 'main';
+      const submitBtn = document.getElementById('btn-submit-pull');
+
+      if (!url) {
+        showToast('Please enter a repository URL', true);
+        return;
+      }
+
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = `<i class="fa-solid fa-spinner animate-spin text-xs"></i> <span>Pulling...</span>`;
+      }
 
       try {
         const res = await apiFetch('/api/repo/pull', {
           method: 'POST',
           body: JSON.stringify({ url, branch })
         });
+        const data = await res.json();
         if (res.ok) {
           state.modals.pull = false;
+          state.currentRepoUrl = url;
+          state.pullRepoUrl = url;
+          state.pullBranch = branch;
+          state.openTabs = [];
+          state.activeTabPath = null;
+          showToast(data.message || 'Repository pulled successfully!');
           await loadWorkspaceTree();
-          alert('Repository pulled successfully!');
+          await loadGitHubRepos();
         } else {
-          const err = await res.json();
-          alert(`Pull failed: ${err.detail}`);
+          showToast(data.detail || 'Failed to pull repository', true);
         }
       } catch (err) {
-        alert(`Error: ${err.message}`);
+        showToast(`Error: ${err.message}`, true);
+      } finally {
+        render();
       }
     });
 
     document.getElementById('form-push')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const commit_message = document.getElementById('push-message').value;
-      const branch = document.getElementById('push-branch').value;
+      const messageInput = document.getElementById('push-message');
+      const branchInput = document.getElementById('push-branch');
+      const message = messageInput ? messageInput.value.trim() : '';
+      const branch = branchInput ? branchInput.value.trim() || 'main' : 'main';
 
-      try {
-        const res = await apiFetch('/api/repo/push', {
-          method: 'POST',
-          body: JSON.stringify({ commit_message, branch })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          state.modals.push = false;
-          alert(data.message || 'Pushed successfully!');
-        } else {
-          const err = await res.json();
-          alert(`Push failed: ${err.detail}`);
-        }
-      } catch (err) {
-        alert(`Error: ${err.message}`);
+      if (!message) {
+        showToast('Please enter a commit message', true);
+        return;
       }
-    });
 
-    document.getElementById('btn-fetch-tags')?.addEventListener('click', async () => {
-      const img = document.getElementById('build-image').value.trim();
-      if (!img) return;
       try {
-        const res = await apiFetch('/api/dockerhub/tags', {
+        const res = await apiFetch('/api/git/push', {
           method: 'POST',
-          body: JSON.stringify({ image_name: img })
+          body: JSON.stringify({ message, commit_message: message, branch })
         });
+        const data = await res.json();
         if (res.ok) {
-          const data = await res.json();
-          state.tagsList = data.tags || ['latest'];
+          state.modals.push = false;
+          showToast(data.message || 'Git push initiated. Live logs streaming to Build Console.');
+          if (data.job_id) {
+            connectWebSocket(data.job_id);
+          }
+          render();
+        } else {
+          showToast(data.detail || 'Failed to initiate Git push', true);
+          state.activeJobLogs += `\n[${new Date().toLocaleTimeString()}] [ERROR] Git Push Failed: ${data.detail || 'Unknown error'}\n`;
           render();
         }
-      } catch (e) {
-        console.error(e);
+      } catch (err) {
+        showToast(`Error: ${err.message}`, true);
       }
     });
 
-    document.getElementById('select-tag-preset')?.addEventListener('change', (e) => {
-      document.getElementById('build-tag').value = e.target.value;
-      state.dockerTagInput = e.target.value;
-    });
-
-    document.getElementById('form-build')?.addEventListener('submit', async (e) => {
+    // Build Local Docker Image Form Handler
+    document.getElementById('form-build-image')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const image_name = document.getElementById('build-image').value;
-      const tag = document.getElementById('build-tag').value;
+      const tagInput = document.getElementById('build-local-tag');
+      const tag = tagInput ? tagInput.value.trim() || 'latest' : 'latest';
+      state.dockerLocalTagInput = tag;
 
       try {
         const res = await apiFetch('/api/jobs/build', {
           method: 'POST',
-          body: JSON.stringify({ image_name, tag })
+          body: JSON.stringify({
+            action: 'build',
+            image_name: 'dockforge',
+            tag: tag,
+            local_image: 'dockforge'
+          })
         });
         if (res.ok) {
           const data = await res.json();
@@ -1557,10 +2325,72 @@
           connectWebSocket(data.job_id);
         } else {
           const err = await res.json();
-          alert(`Build trigger failed: ${err.detail}`);
+          showToast(`Build trigger failed: ${err.detail || 'Unknown error'}`, true);
         }
       } catch (err) {
-        alert(`Error: ${err.message}`);
+        showToast(`Error: ${err.message}`, true);
+      }
+    });
+
+    // Push Docker Image to Registry Form Handlers
+    document.getElementById('select-push-dockerhub-repo')?.addEventListener('change', (e) => {
+      const val = e.target.value;
+      if (val) {
+        const input = document.getElementById('push-docker-repo');
+        if (input) input.value = val;
+        state.dockerImageInput = val;
+        loadDockerHubTags(val);
+      }
+    });
+
+    document.getElementById('select-push-tag-preset')?.addEventListener('change', (e) => {
+      const val = e.target.value;
+      if (val) {
+        const input = document.getElementById('push-docker-tag');
+        if (input) input.value = val;
+        state.dockerTagInput = val;
+      }
+    });
+
+    document.getElementById('btn-refresh-push-dh-repos')?.addEventListener('click', () => {
+      loadDockerHubRepos(true);
+    });
+
+    document.getElementById('form-push-docker')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const repoInput = document.getElementById('push-docker-repo');
+      const tagInput = document.getElementById('push-docker-tag');
+      const imageName = repoInput ? repoInput.value.trim() : '';
+      const tag = tagInput ? tagInput.value.trim() || 'latest' : 'latest';
+
+      if (!imageName) {
+        showToast("Please enter or select a target Docker Hub repository", true);
+        return;
+      }
+
+      state.dockerImageInput = imageName;
+      state.dockerTagInput = tag;
+
+      try {
+        const res = await apiFetch('/api/jobs/build', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'push',
+            image_name: imageName,
+            tag: tag,
+            local_image: 'dockforge'
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          state.modals.pushDocker = false;
+          connectWebSocket(data.job_id);
+        } else {
+          const err = await res.json();
+          showToast(`Push trigger failed: ${err.detail || 'Unknown error'}`, true);
+        }
+      } catch (err) {
+        showToast(`Error: ${err.message}`, true);
       }
     });
 
@@ -1589,24 +2419,35 @@
           body: JSON.stringify({ type: 'github', token })
         });
         const data = await res.json();
-        if (res.ok) alert(`GitHub Connection Success: ${data.message}`);
-        else alert(`GitHub Test Failed: ${data.detail}`);
+        if (res.ok) {
+          showToast(`GitHub Connected: ${data.message}`);
+          state.settings.github_token = token;
+          loadGitHubRepos();
+        } else {
+          alert(`GitHub Test Failed: ${data.detail}`);
+        }
       } catch (e) {
         alert(`Error: ${e.message}`);
       }
     });
 
     document.getElementById('btn-test-dh')?.addEventListener('click', async () => {
-      const username = document.getElementById('setting-dh-user').value;
-      const token = document.getElementById('setting-dh-token').value;
+      const username = document.getElementById('setting-dh-user').value.trim();
+      const token = document.getElementById('setting-dh-token').value.trim();
       try {
         const res = await apiFetch('/api/settings/test-connection', {
           method: 'POST',
           body: JSON.stringify({ type: 'dockerhub', username, token })
         });
         const data = await res.json();
-        if (res.ok) alert(`Docker Hub Connection Success: ${data.message}`);
-        else alert(`Docker Hub Test Failed: ${data.detail}`);
+        if (res.ok) {
+          showToast(`Docker Hub Connected: ${data.message}`);
+          state.settings.dockerhub_username = username;
+          state.settings.dockerhub_token = token;
+          loadDockerHubRepos();
+        } else {
+          alert(`Docker Hub Test Failed: ${data.detail}`);
+        }
       } catch (e) {
         alert(`Error: ${e.message}`);
       }
@@ -1665,6 +2506,12 @@
             state.user = data.username;
             safeLocalStorageSet('dockforge_user', data.username);
           }
+          if (github_token) {
+            loadGitHubRepos();
+          }
+          if (dockerhub_username) {
+            loadDockerHubRepos();
+          }
           await loadCredentials();
           state.modals.settings = false;
           showToast('Credentials updated successfully!');
@@ -1691,6 +2538,17 @@
     console.warn('[DockForge] Unhandled promise rejection:', event.reason);
   });
 
+  // Global click listener to close Active Project dropdown on outside clicks
+  document.addEventListener('click', (e) => {
+    if (state.activeProjectMenuOpen) {
+      const container = document.getElementById('active-project-dropdown-container');
+      if (container && !container.contains(e.target)) {
+        state.activeProjectMenuOpen = false;
+        render();
+      }
+    }
+  });
+
   // --- INITIALIZATION ---
   async function init() {
     try {
@@ -1699,7 +2557,9 @@
         await loadWorkspaceTree();
         await loadSettings();
         await loadJobs();
+        await loadGitHubRepos();
       }
+      syncActiveRepo();
       render();
     } catch (err) {
       console.error('[DockForge] Initialization Error:', err);

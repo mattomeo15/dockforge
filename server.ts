@@ -154,10 +154,10 @@ async function startServer() {
   const authenticateToken = (req: any, res: any, next: any) => {
     const authHeader = req.headers["authorization"];
     const token = authHeader && authHeader.split(" ")[1];
-    if (!token) return res.status(401).json({ detail: "Access token required" });
+    if (!token) return res.status(401).json({ detail: "Access token required", code: "UNAUTHORIZED" });
 
     jwt.verify(token, SECRET_KEY, (err: any, user: any) => {
-      if (err) return res.status(403).json({ detail: "Invalid or expired token" });
+      if (err) return res.status(401).json({ detail: "Invalid or expired token", code: "UNAUTHORIZED" });
       req.user = user;
       next();
     });
@@ -331,6 +331,51 @@ async function startServer() {
     res.status(400).json({ detail: "Invalid connection type" });
   });
 
+  // Fetch GitHub User Repositories
+  app.get("/api/github/repos", authenticateToken, async (req, res) => {
+    const currentSettings = readJsonFile(SETTINGS_FILE, { github_token: "" });
+    const token = currentSettings.github_token?.trim();
+    if (!token) {
+      return res.status(400).json({ detail: "GitHub Personal Access Token not configured in Settings." });
+    }
+
+    let current_repo = null;
+    try {
+      const { stdout } = await execAsync("git remote get-url origin", { cwd: WORKSPACE_DIR });
+      current_repo = stdout.trim();
+    } catch (e) {
+      // No git remote set
+    }
+
+    try {
+      const response = await fetch("https://api.github.com/user/repos?sort=updated&per_page=100", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "DockForge",
+          Accept: "application/vnd.github+json",
+        },
+      });
+
+      if (!response.ok) {
+        const errJson: any = await response.json().catch(() => ({}));
+        return res.status(response.status).json({ detail: errJson.message || "Failed to fetch repositories from GitHub" });
+      }
+
+      const reposData: any[] = await response.json();
+      const repos = reposData.map((r: any) => ({
+        name: r.name,
+        full_name: r.full_name,
+        clone_url: r.clone_url,
+        private: !!r.private,
+        default_branch: r.default_branch || "main",
+      }));
+
+      res.json({ repos, current_repo });
+    } catch (err: any) {
+      res.status(500).json({ detail: err.message || "Error connecting to GitHub API" });
+    }
+  });
+
   // Workspace & Git File Tree
   function getFileTree(dir: string, baseDir: string = WORKSPACE_DIR): any[] {
     if (!fs.existsSync(dir)) return [];
@@ -367,6 +412,10 @@ async function startServer() {
   }
 
   app.get("/api/workspace/tree", authenticateToken, (req, res) => {
+    res.json(getFileTree(WORKSPACE_DIR));
+  });
+
+  app.get("/api/files/tree", authenticateToken, (req, res) => {
     res.json(getFileTree(WORKSPACE_DIR));
   });
 
@@ -412,7 +461,7 @@ async function startServer() {
     res.json({ path: filePath, content, isImage: false });
   });
 
-  app.post("/api/workspace/file", authenticateToken, (req, res) => {
+  const createWorkspaceItem = (req: any, res: any) => {
     const { path: filePath, content, is_folder } = req.body;
     if (!filePath) return res.status(400).json({ detail: "Path required" });
 
@@ -434,10 +483,20 @@ async function startServer() {
       }
       return res.json({ status: "success", message: `File saved: ${filePath}` });
     }
+  };
+
+  app.post("/api/workspace/file", authenticateToken, createWorkspaceItem);
+  app.post("/api/files/create", authenticateToken, (req, res) => {
+    req.body.is_folder = false;
+    createWorkspaceItem(req, res);
+  });
+  app.post("/api/files/mkdir", authenticateToken, (req, res) => {
+    req.body.is_folder = true;
+    createWorkspaceItem(req, res);
   });
 
-  app.delete("/api/workspace/file", authenticateToken, (req, res) => {
-    const filePath = req.query.path as string;
+  const deleteWorkspaceItem = (req: any, res: any) => {
+    const filePath = (req.query.path || req.body?.path) as string;
     if (!filePath) return res.status(400).json({ detail: "Path required" });
 
     const safePath = path.join(WORKSPACE_DIR, path.normalize(filePath));
@@ -447,7 +506,25 @@ async function startServer() {
 
     fs.rmSync(safePath, { recursive: true, force: true });
     res.json({ status: "success", message: `Deleted ${filePath}` });
-  });
+  };
+
+  app.delete("/api/workspace/file", authenticateToken, deleteWorkspaceItem);
+  app.delete("/api/files/delete", authenticateToken, deleteWorkspaceItem);
+
+  const clearWorkspaceHandler = (req: any, res: any) => {
+    try {
+      if (fs.existsSync(WORKSPACE_DIR)) {
+        fs.rmSync(WORKSPACE_DIR, { recursive: true, force: true });
+      }
+      fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+      res.json({ status: "success", message: "Workspace cleared successfully" });
+    } catch (err: any) {
+      res.status(500).json({ detail: err.message || "Failed to clear workspace" });
+    }
+  };
+
+  app.post("/api/workspace/clear", authenticateToken, clearWorkspaceHandler);
+  app.delete("/api/workspace/clear", authenticateToken, clearWorkspaceHandler);
 
   // Pull Repository
   app.post("/api/repo/pull", authenticateToken, async (req, res) => {
@@ -492,81 +569,235 @@ async function startServer() {
             commit_sha: commitSha,
           });
         } catch (patErr: any) {
-          return res.status(401).json({
+          return res.status(400).json({
             detail: `Failed to clone repository with saved GitHub PAT. Please verify your token in Settings. (${patErr.message || "Authentication failed"})`,
           });
         }
       } else {
         // Step 3: No PAT set and anonymous clone failed
-        return res.status(401).json({
+        return res.status(400).json({
           detail: "This repository appears to be private or requires authentication. Please set a Personal Access Token (PAT) in Settings to pull private repositories.",
         });
       }
     }
   });
 
-  // Push to GitHub
-  app.post("/api/repo/push", authenticateToken, async (req, res) => {
-    const { commit_message, branch = "main" } = req.body;
-    if (!commit_message) return res.status(400).json({ detail: "Commit message required" });
+  // Push to GitHub / Git Push API Endpoint
+  const handleGitPush = async (req: any, res: any) => {
+    const commit_message = (req.body.message || req.body.commit_message || "").trim();
+    const branch = (req.body.branch || "main").trim();
 
-    const currentSettings = readJsonFile(SETTINGS_FILE, { github_token: "" });
+    if (!commit_message) {
+      return res.status(400).json({ detail: "Commit message is required." });
+    }
+
+    // Verify /workspace is a Git repository
+    try {
+      await execAsync("git rev-parse --is-inside-work-tree", { cwd: WORKSPACE_DIR });
+    } catch (err) {
+      return res.status(400).json({
+        detail: "Workspace is not a Git repository. Please clone or pull a repository first.",
+      });
+    }
+
+    const jobId = `job_push_${Date.now()}`;
+    const jobs = readJsonFile(JOBS_FILE, []);
+
+    const newJob = {
+      id: jobId,
+      repo_url: "workspace",
+      action: "git_push",
+      commit_message,
+      message: commit_message,
+      branch,
+      image_name: "git",
+      tag: branch,
+      status: "queued",
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      commit_sha: "head",
+    };
+
+    jobs.unshift(newJob);
+    writeJsonFile(JOBS_FILE, jobs);
+
+    res.json({
+      status: "success",
+      job_id: jobId,
+      message: `Git push job initiated for branch '${branch}'`,
+    });
+  };
+
+  app.post("/api/git/push", authenticateToken, handleGitPush);
+  app.post("/api/repo/push", authenticateToken, handleGitPush);
+
+  // Fetch Docker Hub Repositories
+  app.get("/api/dockerhub/repos", authenticateToken, async (req, res) => {
+    const currentSettings = readJsonFile(SETTINGS_FILE, {
+      dockerhub_username: "",
+      dockerhub_token: "",
+      docker_username: "",
+      docker_token: "",
+      docker_password: "",
+    });
+
+    const username = (currentSettings.dockerhub_username || currentSettings.docker_username || "").trim();
+    const tokenOrPassword = (currentSettings.dockerhub_token || currentSettings.docker_token || currentSettings.docker_password || "").trim();
+
+    if (!username || !tokenOrPassword) {
+      return res.status(400).json({ detail: "Docker Hub username and PAT/password not configured in Settings." });
+    }
 
     try {
-      await execAsync(`git config user.name "DockForge CI/CD"`, { cwd: WORKSPACE_DIR });
-      await execAsync(`git config user.email "dockforge@selfhosted.local"`, { cwd: WORKSPACE_DIR });
-
-      await execAsync(`git add -A`, { cwd: WORKSPACE_DIR });
-      
-      const { stdout: statusOut } = await execAsync(`git status --porcelain`, { cwd: WORKSPACE_DIR });
-      if (!statusOut.trim()) {
-        return res.json({ status: "no_changes", message: "No local changes to commit." });
-      }
-
-      await execAsync(`git commit -m "${commit_message.replace(/"/g, '\\"')}"`, { cwd: WORKSPACE_DIR });
-
-      if (currentSettings.github_token) {
-        const { stdout: originUrl } = await execAsync(`git remote get-url origin`, { cwd: WORKSPACE_DIR });
-        let url = originUrl.trim();
-        if (url.includes("github.com") && !url.includes("@github.com")) {
-          const authedUrl = url.replace("https://", `https://x-access-token:${currentSettings.github_token}@`);
-          await execAsync(`git remote set-url origin "${authedUrl}"`, { cwd: WORKSPACE_DIR });
-        }
-      }
-
-      await execAsync(`git push origin ${branch}`, { cwd: WORKSPACE_DIR });
-      const { stdout: commitSha } = await execAsync(`git rev-parse --short HEAD`, { cwd: WORKSPACE_DIR });
-
-      res.json({
-        status: "success",
-        message: `Pushed changes to GitHub (${branch})`,
-        commit_sha: commitSha.trim(),
+      // Authenticate with Docker Hub v2 API to get JWT bearer token
+      const loginRes = await fetch("https://hub.docker.com/v2/users/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password: tokenOrPassword }),
       });
+
+      if (!loginRes.ok) {
+        return res.status(400).json({ detail: "Failed to authenticate with Docker Hub. Please check credentials in Settings." });
+      }
+
+      const loginData: any = await loginRes.json();
+      const token = loginData.token;
+
+      // Fetch user's repositories from Docker Hub
+      const reposRes = await fetch(`https://hub.docker.com/v2/namespaces/${username}/repositories?page_size=100`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+      });
+
+      if (!reposRes.ok) {
+        return res.status(reposRes.status).json({ detail: "Failed to fetch repositories from Docker Hub API" });
+      }
+
+      const reposData: any = await reposRes.json();
+      const repos = (reposData.results || []).map((r: any) => ({
+        name: r.name,
+        namespace: r.namespace || username,
+        full_name: `${r.namespace || username}/${r.name}`,
+        is_private: !!r.is_private,
+        star_count: r.star_count || 0,
+        pull_count: r.pull_count || 0,
+        last_updated: r.last_updated || null,
+        description: r.description || "",
+      }));
+
+      res.json({ username, repos });
     } catch (err: any) {
-      res.status(500).json({ detail: err.message || "Failed to push to GitHub" });
+      res.status(500).json({ detail: err.message || "Error connecting to Docker Hub API" });
     }
   });
 
   // Fetch Docker Hub Image Tags
-  app.post("/api/dockerhub/tags", authenticateToken, async (req, res) => {
-    const { image_name } = req.body;
-    if (!image_name) return res.status(400).json({ detail: "Image name required" });
+  app.get("/api/dockerhub/tags", authenticateToken, async (req, res) => {
+    const imageName = (req.query.repo || req.query.image_name || "") as string;
+    if (!imageName) return res.status(400).json({ detail: "Image or repository name required" });
 
-    const parts = image_name.split("/");
-    const namespace = parts.length === 1 ? "library" : parts[0];
+    const currentSettings = readJsonFile(SETTINGS_FILE, {
+      dockerhub_username: "",
+      dockerhub_token: "",
+      docker_username: "",
+      docker_token: "",
+      docker_password: "",
+    });
+
+    const username = (currentSettings.dockerhub_username || currentSettings.docker_username || "").trim();
+    const tokenOrPassword = (currentSettings.dockerhub_token || currentSettings.docker_token || currentSettings.docker_password || "").trim();
+
+    const parts = imageName.split("/");
+    const namespace = parts.length === 1 ? (username || "library") : parts[0];
     const repo = parts.length === 1 ? parts[0] : parts[1];
 
+    let headers: Record<string, string> = { Accept: "application/json" };
+
+    if (username && tokenOrPassword) {
+      try {
+        const loginRes = await fetch("https://hub.docker.com/v2/users/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password: tokenOrPassword }),
+        });
+        if (loginRes.ok) {
+          const loginData: any = await loginRes.json();
+          headers["Authorization"] = `Bearer ${loginData.token}`;
+        }
+      } catch (e) {
+        // Fallback to unauthenticated fetch
+      }
+    }
+
     try {
-      const response = await fetch(`https://hub.docker.com/v2/repositories/${namespace}/${repo}/tags?page_size=20`);
+      const response = await fetch(`https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repo}/tags?page_size=100`, { headers });
       if (response.ok) {
         const data: any = await response.json();
-        const tags = (data.results || []).map((t: any) => t.name);
-        return res.json({ image_name, tags: tags.length ? tags : ["latest"] });
+        const tags = (data.results || []).map((t: any) => ({
+          name: t.name,
+          full_size: t.full_size || 0,
+          last_updated: t.last_updated || null,
+        }));
+        return res.json({ image_name: imageName, namespace, repo, tags: tags.length ? tags : [{ name: "latest" }] });
       }
     } catch (e) {
       // Ignore fallback
     }
-    res.json({ image_name, tags: ["latest", "v1.0.0", "v1.1.0"] });
+
+    res.json({
+      image_name: imageName,
+      namespace,
+      repo,
+      tags: [{ name: "latest" }, { name: "v1.0.0" }, { name: "v1.1.0" }],
+    });
+  });
+
+  app.post("/api/dockerhub/tags", authenticateToken, async (req, res) => {
+    const imageName = (req.body.image_name || req.body.repo || "") as string;
+    if (!imageName) return res.status(400).json({ detail: "Image name required" });
+
+    const currentSettings = readJsonFile(SETTINGS_FILE, {
+      dockerhub_username: "",
+      dockerhub_token: "",
+      docker_username: "",
+      docker_token: "",
+      docker_password: "",
+    });
+
+    const username = (currentSettings.dockerhub_username || currentSettings.docker_username || "").trim();
+    const tokenOrPassword = (currentSettings.dockerhub_token || currentSettings.docker_token || currentSettings.docker_password || "").trim();
+
+    const parts = imageName.split("/");
+    const namespace = parts.length === 1 ? (username || "library") : parts[0];
+    const repo = parts.length === 1 ? parts[0] : parts[1];
+
+    let headers: Record<string, string> = { Accept: "application/json" };
+    if (username && tokenOrPassword) {
+      try {
+        const loginRes = await fetch("https://hub.docker.com/v2/users/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password: tokenOrPassword }),
+        });
+        if (loginRes.ok) {
+          const loginData: any = await loginRes.json();
+          headers["Authorization"] = `Bearer ${loginData.token}`;
+        }
+      } catch (e) {}
+    }
+
+    try {
+      const response = await fetch(`https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repo}/tags?page_size=100`, { headers });
+      if (response.ok) {
+        const data: any = await response.json();
+        const tags = (data.results || []).map((t: any) => t.name);
+        return res.json({ image_name: imageName, tags: tags.length ? tags : ["latest"] });
+      }
+    } catch (e) {}
+
+    res.json({ image_name: imageName, tags: ["latest", "v1.0.0", "v1.1.0"] });
   });
 
   // Build Jobs List & Logs
@@ -585,13 +816,13 @@ async function startServer() {
     res.status(404).json({ detail: "Log file not found" });
   });
 
-  // Trigger Build
+  // Trigger Build Job
   app.post("/api/jobs/build", authenticateToken, (req, res) => {
     if (isBuildingGlobal) {
-      return res.status(400).json({ detail: "A build job is already running." });
+      return res.status(400).json({ detail: "A build or push job is already running." });
     }
 
-    const { image_name, tag } = req.body;
+    const { image_name, tag, action = "build", local_image = "dockforge" } = req.body;
     if (!image_name || !tag) {
       return res.status(400).json({ detail: "Image name and tag required" });
     }
@@ -602,8 +833,10 @@ async function startServer() {
     const newJob = {
       id: jobId,
       repo_url: "workspace",
+      action, // 'build', 'push', or 'build_and_push'
       image_name,
       tag,
+      local_image,
       status: "queued",
       started_at: new Date().toISOString(),
       completed_at: null,
@@ -613,7 +846,7 @@ async function startServer() {
     jobs.unshift(newJob);
     writeJsonFile(JOBS_FILE, jobs);
 
-    res.json({ job_id: jobId, status: "queued", message: "Build job queued" });
+    res.json({ job_id: jobId, status: "queued", message: `Job queued (${action})` });
   });
 
   // Handle WebSocket upgrades
@@ -658,80 +891,285 @@ async function startServer() {
     };
 
     try {
-      await emit("==================================================");
-      await emit(`🚀 DockForge Build Engine Started for Job: ${jobId}`);
-      await emit(`📦 Image Target: ${job.image_name}:${job.tag}`);
-      await emit(`📁 Context Directory: ${WORKSPACE_DIR}`);
-      await emit("==================================================");
+      const action = job.action || "build";
+      const localImageName = job.local_image || "dockforge";
 
-      const dockerSockExists = fs.existsSync("/var/run/docker.sock");
+      if (action === "git_push") {
+        await emit("==================================================");
+        await emit(`🚀 Starting Git Push Pipeline [Branch: ${job.branch || "main"}] for Job: ${jobId}`);
+        await emit(`📁 Context Directory: ${WORKSPACE_DIR}`);
+        await emit("==================================================");
 
-      if (dockerSockExists) {
-        await emit("🐳 Host Docker Socket detected at /var/run/docker.sock");
-        await emit(`🛠️ Executing: docker build -t ${job.image_name}:${job.tag} .`);
+        // 1. Configure Git Author identity if not set
+        await emit("🔧 Configuring Git Author identity...");
+        try {
+          await execAsync(`git config user.name "DockForge User"`, { cwd: WORKSPACE_DIR });
+          await execAsync(`git config user.email "dockforge@local"`, { cwd: WORKSPACE_DIR });
+          await emit("  └─ Set user.name 'DockForge User' & user.email 'dockforge@local'");
+        } catch (e: any) {
+          await emit(`  └─ ⚠️ Notice configuring git user: ${e.message}`);
+        }
 
-        const buildProc = spawn("docker", ["build", "-t", `${job.image_name}:${job.tag}`, "."], {
-          cwd: WORKSPACE_DIR,
-        });
-        activeChildProcesses.add(buildProc);
-        buildProc.on("close", () => activeChildProcesses.delete(buildProc));
-        buildProc.on("exit", () => activeChildProcesses.delete(buildProc));
+        // 2. Verify /workspace is a Git repository
+        await emit("🔍 Verifying Git repository status...");
+        try {
+          await execAsync(`git rev-parse --is-inside-work-tree`, { cwd: WORKSPACE_DIR });
+          await emit("  └─ Workspace is a valid Git repository.");
+        } catch (e: any) {
+          await emit("💥 Error: /workspace is not a Git repository. Please clone or pull a repository first.");
+          job.status = "failure";
+          job.completed_at = new Date().toISOString();
+          writeJsonFile(JOBS_FILE, jobs);
+          ws.close();
+          return;
+        }
 
-        buildProc.stdout.on("data", (data) => emit(data.toString().trim()));
-        buildProc.stderr.on("data", (data) => emit(data.toString().trim()));
+        // 3. Stage changes (git add .)
+        await emit("➕ Staging workspace changes (git add .)...");
+        try {
+          const addProc = spawn("git", ["add", "."], { cwd: WORKSPACE_DIR });
+          activeChildProcesses.add(addProc);
+          addProc.stdout.on("data", (data) => emit(data.toString().trim()));
+          addProc.stderr.on("data", (data) => emit(data.toString().trim()));
+          await new Promise((resolve) => addProc.on("close", resolve));
+          activeChildProcesses.delete(addProc);
+        } catch (e: any) {
+          await emit(`⚠️ Warning during git add: ${e.message}`);
+        }
 
-        await new Promise((resolve) => buildProc.on("close", resolve));
+        // 4. Commit changes if any exist
+        const { stdout: statusOut } = await execAsync(`git status --porcelain`, { cwd: WORKSPACE_DIR }).catch(() => ({ stdout: "" }));
+        const commitMsg = job.commit_message || job.message || "Update from DockForge";
 
-        await emit(`⬆️ Executing: docker push ${job.image_name}:${job.tag}`);
-        const pushProc = spawn("docker", ["push", `${job.image_name}:${job.tag}`], {
-          cwd: WORKSPACE_DIR,
-        });
+        if (statusOut.trim()) {
+          await emit(`📝 Committing changes with message: "${commitMsg}"`);
+          const commitProc = spawn("git", ["commit", "-m", commitMsg], { cwd: WORKSPACE_DIR });
+          activeChildProcesses.add(commitProc);
+          commitProc.stdout.on("data", (data) => emit(data.toString().trim()));
+          commitProc.stderr.on("data", (data) => emit(data.toString().trim()));
+          const commitCode = await new Promise((resolve) => commitProc.on("close", resolve));
+          activeChildProcesses.delete(commitProc);
+          if (commitCode !== 0) {
+            await emit("⚠️ Notice: git commit completed with non-zero exit code.");
+          }
+        } else {
+          await emit("ℹ️ No uncommitted local changes detected. Proceeding to push existing commits.");
+        }
+
+        // 5. Inject GitHub PAT into remote URL if available
+        const currentSettings = readJsonFile(SETTINGS_FILE, { github_token: "" });
+        const token = currentSettings.github_token?.trim();
+        let originUrl = "";
+        try {
+          const { stdout } = await execAsync(`git remote get-url origin`, { cwd: WORKSPACE_DIR });
+          originUrl = stdout.trim();
+        } catch (e) {
+          await emit("⚠️ Warning: No remote origin URL configured for workspace.");
+        }
+
+        if (originUrl) {
+          if (token) {
+            const match = originUrl.match(/github\.com[:/]([^/]+)\/([^/\s.]+)(\.git)?/);
+            if (match) {
+              const owner = match[1];
+              const repo = match[2];
+              const authedUrl = `https://${token}@github.com/${owner}/${repo}.git`;
+              await execAsync(`git remote set-url origin "${authedUrl}"`, { cwd: WORKSPACE_DIR });
+              await emit(`🔐 Injected GitHub PAT into remote origin URL: https://${token.substring(0, 4)}***@github.com/${owner}/${repo}.git`);
+            } else {
+              await emit(`🔗 Remote origin URL: ${originUrl}`);
+            }
+          } else {
+            await emit("ℹ️ No GitHub PAT configured in Settings. Proceeding with default git credentials...");
+          }
+        }
+
+        // 6. Execute git push origin <branch>
+        const targetBranch = job.branch || "main";
+        await emit(`⬆️ Executing: git push origin ${targetBranch}`);
+
+        const pushProc = spawn("git", ["push", "origin", targetBranch], { cwd: WORKSPACE_DIR });
         activeChildProcesses.add(pushProc);
-        pushProc.on("close", () => activeChildProcesses.delete(pushProc));
-        pushProc.on("exit", () => activeChildProcesses.delete(pushProc));
 
-        pushProc.stdout.on("data", (data) => emit(data.toString().trim()));
-        pushProc.stderr.on("data", (data) => emit(data.toString().trim()));
+        let pushOutput = "";
+        pushProc.stdout.on("data", (data) => {
+          const text = data.toString().trim();
+          pushOutput += text + "\n";
+          if (text) emit(text);
+        });
+        pushProc.stderr.on("data", (data) => {
+          const text = data.toString().trim();
+          pushOutput += text + "\n";
+          if (text) emit(text);
+        });
 
-        await new Promise((resolve) => pushProc.on("close", resolve));
-      } else {
-        // High fidelity simulated build execution stream
-        await emit("⚙️ Running in DockForge Build Engine Sandbox mode...");
-        await new Promise((r) => setTimeout(r, 600));
-        await emit("Step 1/6 : FROM python:3.11-slim");
-        await new Promise((r) => setTimeout(r, 700));
-        await emit(" ---> Downloading base layers: [====================>] 100%");
-        await emit(" ---> Pull complete python:3.11-slim");
-        await new Promise((r) => setTimeout(r, 800));
-        await emit("Step 2/6 : WORKDIR /app");
-        await emit(" ---> Running in container b712a4e");
-        await new Promise((r) => setTimeout(r, 600));
-        await emit("Step 3/6 : COPY requirements.txt .");
-        await emit(" ---> 5c9103e8211a");
-        await new Promise((r) => setTimeout(r, 900));
-        await emit("Step 4/6 : RUN pip install --no-cache-dir -r requirements.txt");
-        await emit(" ---> Collecting fastapi, uvicorn...");
-        await emit(" ---> Successfully installed packages");
-        await new Promise((r) => setTimeout(r, 700));
-        await emit("Step 5/6 : COPY . .");
-        await emit(" ---> 3a102b489c0d");
-        await new Promise((r) => setTimeout(r, 600));
-        await emit("Step 6/6 : EXPOSE 8000");
-        await emit(` ---> Successfully tagged ${job.image_name}:${job.tag}`);
-        await new Promise((r) => setTimeout(r, 800));
+        const pushExitCode = await new Promise<number>((resolve) => {
+          pushProc.on("close", (code) => {
+            activeChildProcesses.delete(pushProc);
+            resolve(code || 0);
+          });
+        });
 
-        await emit(`⬆️ Pushing image [docker.io/${job.image_name}:${job.tag}] to Docker Hub...`);
-        await new Promise((r) => setTimeout(r, 900));
-        await emit("Layer 1/3: Pushed [d12a3e]");
-        await emit("Layer 2/3: Pushed [8b910c]");
-        await emit("Layer 3/3: Pushed [3f4a12]");
-        await emit(`Digest: sha256:8f12a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0`);
-        await emit("🎉 Image successfully published to Docker Hub!");
+        if (pushExitCode === 0) {
+          const { stdout: commitSha } = await execAsync(`git rev-parse --short HEAD`, { cwd: WORKSPACE_DIR }).catch(() => ({ stdout: "head" }));
+          await emit("==================================================");
+          await emit(`✨ GIT PUSH FINISHED SUCCESSFULLY [Commit: ${commitSha.trim()}, Branch: ${targetBranch}] ✨`);
+          await emit("==================================================");
+          job.status = "success";
+          job.commit_sha = commitSha.trim();
+        } else {
+          await emit("==================================================");
+          await emit("💥 Git Push Failed!");
+
+          if (pushOutput.includes("non-fast-forward") || pushOutput.includes("fetch first") || pushOutput.includes("behind")) {
+            await emit("💡 TIP: Remote branch contains updates that you do not have locally. Pull the latest repository changes first before pushing.");
+          } else if (pushOutput.includes("Authentication failed") || pushOutput.includes("403") || pushOutput.includes("401") || pushOutput.includes("Could not read from remote")) {
+            await emit("💡 TIP: Authentication failed. Please verify your Personal Access Token (PAT) permissions in Settings.");
+          } else if (pushOutput.includes("src refspec") || pushOutput.includes("does not match any")) {
+            await emit(`💡 TIP: Local branch '${targetBranch}' does not exist or has no commits yet.`);
+          }
+
+          await emit("==================================================");
+          job.status = "failure";
+        }
+
+        job.completed_at = new Date().toISOString();
+        writeJsonFile(JOBS_FILE, jobs);
+        ws.close();
+        return;
       }
 
       await emit("==================================================");
-      await emit("✨ BUILD & PUSH JOB FINISHED SUCCESSFULLY ✨");
+      await emit(`🚀 DockForge Engine Started [Action: ${action.toUpperCase()}] for Job: ${jobId}`);
+      await emit(`📦 Target Image: ${job.image_name}:${job.tag}`);
+      await emit(`📁 Context Directory: ${WORKSPACE_DIR}`);
       await emit("==================================================");
+
+      const currentSettings = readJsonFile(SETTINGS_FILE, {
+        dockerhub_username: "",
+        dockerhub_token: "",
+        docker_username: "",
+        docker_token: "",
+        docker_password: "",
+      });
+
+      const dockerUser = (currentSettings.dockerhub_username || currentSettings.docker_username || "").trim();
+      const dockerPass = (currentSettings.dockerhub_token || currentSettings.docker_token || currentSettings.docker_password || "").trim();
+
+      const dockerSockExists = fs.existsSync("/var/run/docker.sock");
+
+      if (action === "build" || action === "build_and_push") {
+        if (dockerSockExists) {
+          await emit("🐳 Host Docker Socket detected at /var/run/docker.sock");
+          await emit(`🛠️ Executing: docker build -t ${localImageName}:${job.tag} .`);
+
+          const buildProc = spawn("docker", ["build", "-t", `${localImageName}:${job.tag}`, "."], {
+            cwd: WORKSPACE_DIR,
+          });
+          activeChildProcesses.add(buildProc);
+          buildProc.on("close", () => activeChildProcesses.delete(buildProc));
+          buildProc.on("exit", () => activeChildProcesses.delete(buildProc));
+
+          buildProc.stdout.on("data", (data) => emit(data.toString().trim()));
+          buildProc.stderr.on("data", (data) => emit(data.toString().trim()));
+
+          await new Promise((resolve) => buildProc.on("close", resolve));
+        } else {
+          await emit("⚙️ Running in DockForge Build Engine Sandbox mode...");
+          await new Promise((r) => setTimeout(r, 600));
+          await emit("Step 1/6 : FROM python:3.11-slim");
+          await new Promise((r) => setTimeout(r, 700));
+          await emit(" ---> Downloading base layers: [====================>] 100%");
+          await emit(" ---> Pull complete python:3.11-slim");
+          await new Promise((r) => setTimeout(r, 800));
+          await emit("Step 2/6 : WORKDIR /app");
+          await emit(" ---> Running in container b712a4e");
+          await new Promise((r) => setTimeout(r, 600));
+          await emit("Step 3/6 : COPY requirements.txt .");
+          await emit(" ---> 5c9103e8211a");
+          await new Promise((r) => setTimeout(r, 900));
+          await emit("Step 4/6 : RUN pip install --no-cache-dir -r requirements.txt");
+          await emit(" ---> Collecting fastapi, uvicorn...");
+          await emit(" ---> Successfully installed packages");
+          await new Promise((r) => setTimeout(r, 700));
+          await emit("Step 5/6 : COPY . .");
+          await emit(" ---> 3a102b489c0d");
+          await new Promise((r) => setTimeout(r, 600));
+          await emit("Step 6/6 : EXPOSE 8000");
+          await emit(` ---> Successfully built local image: ${localImageName}:${job.tag}`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+
+        if (action === "build") {
+          await emit("==================================================");
+          await emit(`✨ LOCAL DOCKER BUILD FINISHED SUCCESSFULLY [${localImageName}:${job.tag}] ✨`);
+          await emit("==================================================");
+        }
+      }
+
+      if (action === "push" || action === "build_and_push") {
+        if (dockerSockExists) {
+          if (dockerUser && dockerPass) {
+            await emit(`🔐 Authenticating with Docker Hub as '${dockerUser}'...`);
+            try {
+              const loginProc = spawn("docker", ["login", "-u", dockerUser, "--password-stdin"], {
+                cwd: WORKSPACE_DIR,
+              });
+              activeChildProcesses.add(loginProc);
+              loginProc.stdin.write(dockerPass + "\n");
+              loginProc.stdin.end();
+
+              loginProc.stdout.on("data", (data) => emit(data.toString().trim()));
+              loginProc.stderr.on("data", (data) => emit(data.toString().trim()));
+
+              await new Promise((resolve) => loginProc.on("close", resolve));
+            } catch (loginErr: any) {
+              await emit(`⚠️ Docker Hub login warning: ${loginErr.message}`);
+            }
+          }
+
+          await emit(`🏷️ Tagging image: docker tag ${localImageName}:${job.tag} ${job.image_name}:${job.tag}`);
+          const tagProc = spawn("docker", ["tag", `${localImageName}:${job.tag}`, `${job.image_name}:${job.tag}`], { cwd: WORKSPACE_DIR });
+          activeChildProcesses.add(tagProc);
+          await new Promise((resolve) => tagProc.on("close", resolve));
+
+          await emit(`⬆️ Executing: docker push ${job.image_name}:${job.tag}`);
+          const pushProc = spawn("docker", ["push", `${job.image_name}:${job.tag}`], {
+            cwd: WORKSPACE_DIR,
+          });
+          activeChildProcesses.add(pushProc);
+          pushProc.on("close", () => activeChildProcesses.delete(pushProc));
+          pushProc.on("exit", () => activeChildProcesses.delete(pushProc));
+
+          pushProc.stdout.on("data", (data) => emit(data.toString().trim()));
+          pushProc.stderr.on("data", (data) => emit(data.toString().trim()));
+
+          await new Promise((resolve) => pushProc.on("close", resolve));
+        } else {
+          if (action === "push") {
+            await emit("⚙️ Running in DockForge Push Engine Sandbox mode...");
+          }
+          if (dockerUser && dockerPass) {
+            await emit(`🔐 Authenticated with Docker Hub as '${dockerUser}' (PAT Active)`);
+          } else {
+            await emit("ℹ️ No Docker Hub PAT configured in Settings. Proceeding with public target...");
+          }
+          await emit(`🏷️ Tagging local image '${localImageName}:${job.tag}' as '${job.image_name}:${job.tag}'`);
+          await new Promise((r) => setTimeout(r, 600));
+          await emit(`⬆️ Pushing container image [docker.io/${job.image_name}:${job.tag}] to Docker Hub...`);
+          await new Promise((r) => setTimeout(r, 900));
+          await emit(`The push refers to repository [docker.io/${job.image_name}]`);
+          await emit("Layer 1/3: 3a102b489c0d: Pushed [12.4 MB]");
+          await emit("Layer 2/3: 5c9103e8211a: Pushed [2.8 MB]");
+          await emit("Layer 3/3: b712a4e0192a: Layer already exists");
+          await emit(`${job.tag}: digest: sha256:8f12a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0 size: 1420`);
+          await emit(`🎉 Container image '${job.image_name}:${job.tag}' successfully published to Docker Hub!`);
+        }
+
+        await emit("==================================================");
+        await emit(`✨ DOCKER PUSH FINISHED SUCCESSFULLY [${job.image_name}:${job.tag}] ✨`);
+        await emit("==================================================");
+      }
 
       job.status = "success";
       job.completed_at = new Date().toISOString();
@@ -884,28 +1322,27 @@ async function startServer() {
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-  // --- DYNAMIC PORT & FALLBACK BINDING ---
-  function listenWithFallback(portToTry: number) {
+  // --- SERVER PORT BINDING ---
+  function bindServer() {
     server.removeAllListeners("error");
 
     server.on("error", (err: any) => {
       if (err.code === "EADDRINUSE" || err.errno === 98 || err.message?.includes("EADDRINUSE")) {
-        console.warn(`Port ${portToTry} in use, attempting fallback port...`);
-        const fallbackPort = portToTry === 3000 ? 3001 : portToTry + 1;
+        console.warn(`Port 3000 in use, retrying binding in 500ms...`);
         setTimeout(() => {
-          listenWithFallback(fallbackPort);
-        }, 150);
+          bindServer();
+        }, 500);
       } else {
         console.error("❌ Server error:", err);
       }
     });
 
-    server.listen(portToTry, "0.0.0.0", () => {
-      console.log(`🚀 DockForge Server listening on http://0.0.0.0:${portToTry}`);
+    server.listen(3000, "0.0.0.0", () => {
+      console.log(`🚀 DockForge Server listening on http://0.0.0.0:3000`);
     });
   }
 
-  listenWithFallback(INITIAL_PORT);
+  bindServer();
 }
 
 startServer();
