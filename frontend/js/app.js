@@ -66,6 +66,8 @@
     },
     jobs: [],
     activeJobLogs: '',
+    terminalAutoScroll: true,
+    terminalScrollTop: null,
     currentWs: null,
     lastLocalBuild: (() => {
       try {
@@ -572,6 +574,8 @@
     const wsUrl = `${protocol}//${window.location.host}/ws/build/${jobId}`;
 
     state.activeJobLogs = `[${new Date().toLocaleTimeString()}] Connecting to DockForge build stream (${jobId})...\n`;
+    state.terminalAutoScroll = true;
+    state.terminalScrollTop = null;
     render();
 
     const ws = new WebSocket(wsUrl);
@@ -579,10 +583,6 @@
 
     ws.onmessage = (event) => {
       state.activeJobLogs += event.data;
-      const term = document.getElementById('terminal-logs-body');
-      if (term) {
-        term.scrollTop = term.scrollHeight;
-      }
       render();
     };
 
@@ -672,7 +672,7 @@
           <main class="${isMobileCode ? 'flex' : 'hidden'} md:flex flex-1 flex-col min-w-0 min-h-0 w-full h-full dark:bg-slate-950 bg-white dark:text-slate-100 text-slate-800 overflow-hidden">
             ${renderEditorTabs()}
             ${!state.terminalMaximized ? renderEditorBody() : ''}
-            ${!state.editorMaximized ? `<div class="hidden md:flex flex-col border-t dark:border-slate-800 border-slate-200 shrink-0">${renderTerminalLogs()}</div>` : ''}
+            ${!state.editorMaximized ? `<div class="${state.terminalMaximized ? 'flex-1 min-h-0 h-full' : 'h-56 md:h-64 shrink-0 min-h-0'} hidden md:flex flex-col border-t dark:border-slate-800 border-slate-200 w-full overflow-hidden">${renderTerminalLogs()}</div>` : ''}
           </main>
 
           <!-- Console Terminal Panel (Mobile Standalone View) -->
@@ -1192,9 +1192,8 @@
 
   function renderTerminalLogs(isMobileStandalone = false) {
     const isFull = isMobileStandalone || state.terminalMaximized || state.mobileTab === 'console';
-    const containerClass = isFull
-      ? 'flex-1 w-full h-full bg-slate-900 flex flex-col min-h-0'
-      : 'h-56 md:h-64 bg-slate-900 border-t border-slate-800 flex flex-col shrink-0';
+    const containerClass = 'flex-1 w-full h-full bg-slate-900 flex flex-col min-h-0 relative overflow-hidden';
+    const isAutoScrolling = state.terminalAutoScroll !== false;
 
     return `
       <div class="${containerClass}">
@@ -1202,17 +1201,30 @@
           <div class="flex items-center space-x-2">
             <i class="fa-solid fa-terminal text-blue-400"></i>
             <span class="font-semibold uppercase tracking-wider text-slate-300">Build Console & Log Stream</span>
+            ${!isAutoScrolling ? `
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                <i class="fa-solid fa-pause text-[9px] mr-1"></i> Scroll Paused
+              </span>
+            ` : ''}
           </div>
           <div class="flex items-center space-x-2">
-            <button id="btn-clear-logs" class="p-1 hover:text-white transition" title="Clear Console">
+            ${!isAutoScrolling ? `
+              <button id="btn-terminal-resume-autoscroll" class="px-2 py-0.5 text-[11px] bg-blue-600 hover:bg-blue-500 text-white rounded flex items-center space-x-1 transition shadow-sm" title="Jump to Bottom & Resume Auto-scroll">
+                <i class="fa-solid fa-arrow-down text-[10px]"></i>
+                <span>Scroll to Bottom</span>
+              </button>
+            ` : ''}
+            <button id="btn-clear-logs" class="p-1 hover:text-white transition text-slate-400 hover:text-slate-200" title="Clear Console">
               <i class="fa-solid fa-trash-can"></i>
             </button>
-            <button id="btn-toggle-terminal-max" class="p-1 hover:text-white transition hidden md:inline-block" title="${state.terminalMaximized ? 'Restore View' : 'Maximize Console'}">
+            <button id="btn-toggle-terminal-max" class="p-1 hover:text-white transition hidden md:inline-block text-slate-400 hover:text-slate-200" title="${state.terminalMaximized ? 'Restore View' : 'Maximize Console'}">
               <i class="fa-solid ${state.terminalMaximized ? 'fa-compress' : 'fa-expand'} text-xs"></i>
             </button>
           </div>
         </div>
-        <pre id="terminal-logs-body" class="flex-1 p-4 overflow-y-auto font-mono text-xs text-emerald-400 bg-slate-950 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch">${escapeHtml(state.activeJobLogs || 'Ready. Click "Build Docker" to compile image and stream logs.')}</pre>
+        <div class="flex-1 relative min-h-0 h-full w-full overflow-hidden bg-slate-950">
+          <pre id="terminal-logs-body" class="absolute inset-0 p-4 overflow-y-auto font-mono text-xs text-emerald-400 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch min-h-0 max-h-full">${escapeHtml(state.activeJobLogs || 'Ready. Click "Build Docker" to compile image and stream logs.')}</pre>
+        </div>
       </div>
     `;
   }
@@ -2097,8 +2109,46 @@
       }
     });
 
+    // Terminal Scroll & Auto-Scroll Handler
+    const term = document.getElementById('terminal-logs-body');
+    if (term) {
+      if (state.terminalAutoScroll !== false) {
+        term.scrollTop = term.scrollHeight;
+        state.terminalScrollTop = term.scrollTop;
+      } else if (state.terminalScrollTop !== null && state.terminalScrollTop !== undefined) {
+        term.scrollTop = state.terminalScrollTop;
+      }
+
+      term.addEventListener('scroll', () => {
+        const isAtBottom = (term.scrollHeight - term.scrollTop - term.clientHeight) < 35;
+        state.terminalAutoScroll = isAtBottom;
+        state.terminalScrollTop = term.scrollTop;
+
+        const resumeBtn = document.getElementById('btn-terminal-resume-autoscroll');
+        if (resumeBtn) {
+          if (!isAtBottom) {
+            resumeBtn.classList.remove('hidden');
+          } else {
+            resumeBtn.classList.add('hidden');
+          }
+        }
+      });
+    }
+
+    document.getElementById('btn-terminal-resume-autoscroll')?.addEventListener('click', () => {
+      state.terminalAutoScroll = true;
+      state.terminalScrollTop = null;
+      const termEl = document.getElementById('terminal-logs-body');
+      if (termEl) {
+        termEl.scrollTop = termEl.scrollHeight;
+      }
+      render();
+    });
+
     document.getElementById('btn-clear-logs')?.addEventListener('click', () => {
       state.activeJobLogs = '';
+      state.terminalAutoScroll = true;
+      state.terminalScrollTop = null;
       render();
     });
     document.getElementById('btn-toggle-terminal-max')?.addEventListener('click', () => {
@@ -2402,6 +2452,8 @@
           if (res.ok) {
             const data = await res.json();
             state.activeJobLogs = data.logs;
+            state.terminalAutoScroll = true;
+            state.terminalScrollTop = null;
             state.modals.jobs = false;
             render();
           }
