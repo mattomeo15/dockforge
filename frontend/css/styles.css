@@ -1,0 +1,26 @@
+/* Custom CSS for DockForge */
+@import "tailwindcss";
+
+@layer utilities {
+  /* Scrollbar Styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(156, 163, 175, 0.4);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(156, 163, 175, 0.6);
+  }
+}
+
+/* Monaco Editor Container Height */
+.monaco-editor-container {
+  height: 100%;
+  width: 100%;
+}

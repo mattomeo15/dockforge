@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DockForge | Self-Hosted Docker CI/CD IDE</title>
+  <link rel="icon" type="image/png" href="/frontend/public/logo.png">
+  <link rel="shortcut icon" href="/frontend/public/logo.png">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f7ff',
+              500: '#0066ff',
+              600: '#0052cc',
+              700: '#003d99',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="/frontend/css/styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="dark:bg-slate-900 bg-slate-100 dark:text-slate-100 text-slate-800 min-h-screen flex flex-col font-sans antialiased selection:bg-blue-600 selection:text-white">
+  <div id="app" class="flex flex-col h-screen overflow-hidden"></div>
+  <script src="/frontend/js/app.js"></script>
+</body>
+</html>
+
+

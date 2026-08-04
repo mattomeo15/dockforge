@@ -1,0 +1,8 @@
+{
+  "name": "Remix DockForge",
+  "description": "Self-hosted web-based CI/CD pipeline and in-browser Docker IDE with real-time build log streaming and Docker Hub integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
