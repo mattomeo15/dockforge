@@ -12,7 +12,7 @@ from backend.app.database import init_db, get_db
 from backend.app.models import (
     UserDB, SettingsDB, BuildJobDB,
     UserLogin, TokenResponse, SettingsSchema, TestConnectionRequest,
-    RepoPullRequest, FileContentRequest, FileOperationRequest,
+    RepoPullRequest, FileContentRequest, FileOperationRequest, FileMoveRequest,
     GitPushRequest, DockerBuildRequest, DockerPushRequest, DockerHubTagRequest, CredentialsUpdate
 )
 from backend.app.services.auth_service import (
@@ -264,6 +264,46 @@ def delete_file_route(path: str, current_user: UserDB = Depends(get_current_user
     try:
         GitService.delete_path(path)
         return {"status": "success", "message": f"Deleted {path}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/workspace/order")
+def get_workspace_order(current_user: UserDB = Depends(get_current_user)):
+    return GitService.load_tree_order()
+
+@app.post("/api/workspace/order")
+def save_workspace_order(payload: Dict[str, Any], current_user: UserDB = Depends(get_current_user)):
+    try:
+        existing = GitService.load_tree_order()
+        if "order_map" in payload and isinstance(payload["order_map"], dict):
+            existing.update(payload["order_map"])
+            GitService.save_tree_order(existing)
+            return {"status": "success", "order_map": existing}
+        elif "parent_path" in payload and isinstance(payload.get("order"), list):
+            existing[payload["parent_path"]] = payload["order"]
+            GitService.save_tree_order(existing)
+            return {"status": "success", "order_map": existing}
+        raise HTTPException(status_code=400, detail="Invalid order parameters")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/files/move")
+@app.post("/api/workspace/move")
+@app.patch("/api/workspace/move")
+def move_file_route(payload: FileMoveRequest, current_user: UserDB = Depends(get_current_user)):
+    try:
+        old_p = payload.old_path or payload.src
+        new_p = payload.new_path or payload.dest
+        if not old_p or not new_p:
+            raise HTTPException(status_code=400, detail="Both source (old_path) and target (new_path) parameters are required")
+        GitService.move_path(old_p, new_p)
+        return {"status": "success", "message": f"Moved {old_p} to {new_p}", "old_path": old_p, "new_path": new_p}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValueError, FileExistsError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

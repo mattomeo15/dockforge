@@ -95,6 +95,12 @@ class FileOperationRequest(BaseModel):
     path: str
     is_folder: Optional[bool] = False
 
+class FileMoveRequest(BaseModel):
+    old_path: Optional[str] = None
+    new_path: Optional[str] = None
+    src: Optional[str] = None
+    dest: Optional[str] = None
+
 class GitPushRequest(BaseModel):
     commit_message: Optional[str] = None
     message: Optional[str] = None

@@ -60,16 +60,34 @@ class GitService:
                 repo = git.Repo(WORKSPACE_DIR)
                 if github_token:
                     repo.remote("origin").set_url(formatted_url)
-                repo.remotes.origin.pull(branch)
-                commit_sha = repo.head.commit.hexsha[:7] if repo.head else "unknown"
-                return {
-                    "status": "success",
-                    "message": f"Successfully pulled repository updates ({branch})",
-                    "commit_sha": commit_sha,
-                    "path": str(WORKSPACE_DIR)
-                }
+
+                with repo.config_writer() as config:
+                    config.set_value("user", "name", "DockForge User")
+                    config.set_value("user", "email", "dockforge@local")
+
+                pull_success = False
+                try:
+                    repo.remotes.origin.pull(branch)
+                    pull_success = True
+                except Exception:
+                    try:
+                        repo.remotes.origin.fetch(branch)
+                        repo.git.checkout("-B", branch)
+                        repo.git.reset("--hard", "FETCH_HEAD")
+                        pull_success = True
+                    except Exception:
+                        pass
+
+                if pull_success:
+                    commit_sha = repo.head.commit.hexsha[:7] if repo.head else "unknown"
+                    return {
+                        "status": "success",
+                        "message": f"Successfully pulled repository updates ({branch})",
+                        "commit_sha": commit_sha,
+                        "path": str(WORKSPACE_DIR)
+                    }
             except Exception as pull_err:
-                logger.warning(f"Failed git pull in existing workspace ({pull_err}). Performing fresh clone...")
+                logger.info(f"Re-initializing workspace repository via fresh clone...")
 
         try:
             if WORKSPACE_DIR.exists():
@@ -89,26 +107,54 @@ class GitService:
             raise RuntimeError(f"Git clone failed: {err}")
 
     @staticmethod
-    def get_file_tree(base_path: Path = WORKSPACE_DIR) -> List[Dict[str, Any]]:
+    def load_tree_order() -> Dict[str, List[str]]:
+        try:
+            order_file = WORKSPACE_DIR / ".tree_order.json"
+            if order_file.exists():
+                return json.loads(order_file.read_text(encoding="utf-8"))
+        except Exception as err:
+            logger.error(f"Failed loading .tree_order.json: {err}")
+        return {}
+
+    @staticmethod
+    def save_tree_order(order_map: Dict[str, List[str]]) -> None:
+        try:
+            order_file = WORKSPACE_DIR / ".tree_order.json"
+            order_file.write_text(json.dumps(order_map, indent=2), encoding="utf-8")
+        except Exception as err:
+            logger.error(f"Failed saving .tree_order.json: {err}")
+
+    @staticmethod
+    def get_file_tree(base_path: Path = WORKSPACE_DIR, order_map: Optional[Dict[str, List[str]]] = None) -> List[Dict[str, Any]]:
         """Recursively scan workspace directory to generate file tree."""
         if not base_path.exists():
             return []
+        if order_map is None:
+            order_map = GitService.load_tree_order()
 
         tree = []
-        ignored_names = {".git", "node_modules", "__pycache__", ".venv", "dist", ".DS_Store"}
+        ignored_names = {".git", "node_modules", "__pycache__", ".venv", "dist", ".DS_Store", ".tree_order.json"}
 
         try:
-            for entry in sorted(base_path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            rel_dir_path = "" if base_path == WORKSPACE_DIR else str(base_path.relative_to(WORKSPACE_DIR)).replace("\\", "/")
+            dir_order = order_map.get(rel_dir_path, [])
+
+            entries = list(base_path.iterdir())
+            def sort_key(e: Path):
+                idx = dir_order.index(e.name) if e.name in dir_order else 999999
+                return (idx, not e.is_dir(), e.name.lower())
+
+            for entry in sorted(entries, key=sort_key):
                 if entry.name in ignored_names:
                     continue
 
-                rel_path = str(entry.relative_to(WORKSPACE_DIR))
+                rel_path = str(entry.relative_to(WORKSPACE_DIR)).replace("\\", "/")
                 if entry.is_dir():
                     tree.append({
                         "name": entry.name,
                         "path": rel_path,
                         "type": "folder",
-                        "children": GitService.get_file_tree(entry)
+                        "children": GitService.get_file_tree(entry, order_map)
                     })
                 else:
                     tree.append({
@@ -183,6 +229,32 @@ class GitService:
         except Exception as err:
             logger.error(f"Error deleting path {rel_path}: {err}")
             raise err
+
+    @staticmethod
+    def move_path(old_path: str, new_path: str) -> None:
+        """Move or rename a file or directory in workspace."""
+        source = (WORKSPACE_DIR / old_path).resolve()
+        target = (WORKSPACE_DIR / new_path).resolve()
+
+        if not source.is_relative_to(WORKSPACE_DIR.resolve()) or not target.is_relative_to(WORKSPACE_DIR.resolve()):
+            raise ValueError("Invalid file path outside workspace")
+        if not source.exists():
+            raise FileNotFoundError(f"Source item not found: {old_path}")
+        if source == target:
+            raise ValueError("Source and destination paths are identical")
+
+        if source.is_dir():
+            try:
+                target.relative_to(source)
+                raise ValueError("Cannot move a folder into its own subfolder")
+            except ValueError:
+                pass
+
+        if target.exists():
+            raise FileExistsError(f"Target path already exists: {new_path}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
 
     @staticmethod
     def push_to_github(commit_message: str, branch: str = "main", github_token: Optional[str] = None) -> Dict[str, Any]:

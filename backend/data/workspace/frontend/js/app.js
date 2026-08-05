@@ -66,8 +66,6 @@
     },
     jobs: [],
     activeJobLogs: '',
-    terminalAutoScroll: true,
-    terminalScrollTop: null,
     currentWs: null,
     lastLocalBuild: (() => {
       try {
@@ -99,12 +97,9 @@
       testDh: false
     },
     tagsList: ['latest'],
-    dockerImageInput: '',
+    dockerImageInput: 'my-username/my-service',
     dockerTagInput: 'latest',
     expandedFolders: new Set(['']),
-    treeOrder: {},
-    draggedPath: null,
-    draggedIsFolder: false,
     editorMaximized: false,
     terminalMaximized: false,
     mobileTab: 'code',
@@ -116,13 +111,10 @@
     pullBranch: 'main',
     loadingRepos: false,
     cloningRepo: false,
-    activeProject: null,
-    repoPath: null,
-    activeBranch: null,
     activeRepo: {
       name: 'No Project Loaded',
       full_name: '',
-      branch: '',
+      branch: 'main',
       url: ''
     },
     activeProjectMenuOpen: false,
@@ -231,20 +223,14 @@
   async function loadWorkspaceTree(showToastOnSuccess = false) {
     if (!state.token) return;
     try {
-      const [treeRes, orderRes] = await Promise.all([
-        apiFetch('/api/files/tree'),
-        apiFetch('/api/workspace/order').catch(() => null)
-      ]);
-      if (treeRes && treeRes.ok) {
-        state.files = await treeRes.json();
+      const res = await apiFetch('/api/files/tree');
+      if (res.ok) {
+        state.files = await res.json();
+        if (showToastOnSuccess) {
+          showToast('File tree refreshed');
+        }
+        render();
       }
-      if (orderRes && orderRes.ok) {
-        state.treeOrder = await orderRes.json();
-      }
-      if (showToastOnSuccess) {
-        showToast('File tree refreshed');
-      }
-      render();
     } catch (e) {
       console.error('Failed to load file tree:', e);
       if (showToastOnSuccess) {
@@ -283,12 +269,8 @@
       if (res.ok) {
         const data = await res.json();
         state.dockerHubRepos = data.repos || [];
-        const parsed = parseRepoAndTag(state.dockerImageInput && state.dockerImageInput !== 'my-username/my-service' ? state.dockerImageInput : '');
-        const matchedRepo = state.dockerHubRepos.find(r => r.full_name === parsed.repo || r.name === parsed.repo.split('/')[1]);
-        if (matchedRepo) {
-          state.dockerImageInput = matchedRepo.full_name;
-        } else if (parsed.repo) {
-          state.dockerImageInput = parsed.repo;
+        if ((!state.dockerImageInput || state.dockerImageInput === 'my-username/my-service') && state.dockerHubRepos.length > 0) {
+          state.dockerImageInput = state.dockerHubRepos[0].full_name;
         }
         if (state.dockerImageInput) {
           await loadDockerHubTags(state.dockerImageInput);
@@ -354,13 +336,10 @@
   function syncActiveRepo(urlOrFullName = null, targetBranch = null) {
     const url = urlOrFullName !== null ? urlOrFullName : (state.currentRepoUrl || '');
     if (!url) {
-      state.activeProject = null;
-      state.repoPath = null;
-      state.activeBranch = null;
       state.activeRepo = {
         name: 'No Project Loaded',
         full_name: '',
-        branch: '',
+        branch: 'main',
         url: ''
       };
       return;
@@ -408,10 +387,6 @@
       }
     }
 
-    state.activeProject = shortName || null;
-    state.repoPath = fullName || null;
-    state.activeBranch = branch || null;
-
     state.activeRepo = {
       name: shortName || 'No Project Loaded',
       full_name: fullName,
@@ -431,8 +406,6 @@
         state.repos = data.repos || [];
         if (data.current_repo) {
           state.currentRepoUrl = data.current_repo;
-        } else {
-          state.currentRepoUrl = '';
         }
         syncActiveRepo();
       } else {
@@ -599,8 +572,6 @@
     const wsUrl = `${protocol}//${window.location.host}/ws/build/${jobId}`;
 
     state.activeJobLogs = `[${new Date().toLocaleTimeString()}] Connecting to DockForge build stream (${jobId})...\n`;
-    state.terminalAutoScroll = true;
-    state.terminalScrollTop = null;
     render();
 
     const ws = new WebSocket(wsUrl);
@@ -608,6 +579,10 @@
 
     ws.onmessage = (event) => {
       state.activeJobLogs += event.data;
+      const term = document.getElementById('terminal-logs-body');
+      if (term) {
+        term.scrollTop = term.scrollHeight;
+      }
       render();
     };
 
@@ -617,23 +592,15 @@
         showToast('Git Push completed successfully!');
       } else if (state.activeJobLogs.includes('Git Push Failed') || state.activeJobLogs.includes('Push Rejected') || state.activeJobLogs.includes('💥 Error: /workspace is not a Git repository')) {
         showToast('Git Push failed. Check Build Console for details.', true);
-      } else if (state.activeJobLogs.includes('DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('LOCAL DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('BUILD & PUSH JOB FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully built')) {
-        const buildTag = state.dockerTargetImageTagInput || state.dockerLocalTagInput || 'latest';
-        const parsed = parseRepoAndTag(buildTag);
+      } else if (state.activeJobLogs.includes('LOCAL DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('BUILD & PUSH JOB FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully built local image')) {
         state.lastLocalBuild = {
           ready: true,
-          imageName: parsed.repo,
-          tag: buildTag,
-          parsedRepo: parsed.repo,
-          parsedTag: parsed.tag,
+          imageName: 'dockforge',
+          tag: state.dockerLocalTagInput || 'latest',
           timestamp: new Date().toLocaleTimeString()
         };
-        state.dockerImageInput = parsed.repo;
-        state.dockerTagInput = parsed.tag;
         safeLocalStorageSet('dockforge_last_build', JSON.stringify(state.lastLocalBuild));
-        showToast(`Docker image build completed (${parsed.repo}:${parsed.tag})!`);
-      } else if (state.activeJobLogs.includes('DOCKER PUSH FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully pushed')) {
-        showToast('Docker image push completed successfully!');
+        showToast(`Local Docker build ready (${state.lastLocalBuild.tag})!`);
       }
       loadJobs();
       render();
@@ -697,7 +664,7 @@
         ${renderHeader()}
         <div class="flex-1 flex flex-col md:flex-row min-w-0 min-h-0 overflow-hidden relative">
           <!-- Sidebar / File Explorer Panel -->
-          <div class="${isMobileFiles ? 'flex' : 'hidden'} md:flex w-full md:w-72 lg:w-80 h-full shrink-0 flex-col overflow-hidden">
+          <div class="${isMobileFiles ? 'flex' : 'hidden'} md:flex w-full md:w-64 h-full shrink-0 flex-col overflow-hidden">
             ${renderSidebar()}
           </div>
 
@@ -705,7 +672,7 @@
           <main class="${isMobileCode ? 'flex' : 'hidden'} md:flex flex-1 flex-col min-w-0 min-h-0 w-full h-full dark:bg-slate-950 bg-white dark:text-slate-100 text-slate-800 overflow-hidden">
             ${renderEditorTabs()}
             ${!state.terminalMaximized ? renderEditorBody() : ''}
-            ${!state.editorMaximized ? `<div class="${state.terminalMaximized ? 'flex-1 min-h-0 h-full' : 'h-56 md:h-64 shrink-0 min-h-0'} hidden md:flex flex-col border-t dark:border-slate-800 border-slate-200 w-full overflow-hidden">${renderTerminalLogs()}</div>` : ''}
+            ${!state.editorMaximized ? `<div class="hidden md:flex flex-col border-t dark:border-slate-800 border-slate-200 shrink-0">${renderTerminalLogs()}</div>` : ''}
           </main>
 
           <!-- Console Terminal Panel (Mobile Standalone View) -->
@@ -763,168 +730,85 @@
     `;
   }
 
-  function getDockerHubConfig() {
-    const dhUser = (state.settings && (state.settings.dockerhub_username || state.settings.docker_username || state.settings.dockerHubUsername || state.settings.username)) ||
-                   (state.currentCredentials && (state.currentCredentials.dockerhub_username || state.currentCredentials.docker_username)) ||
-                   safeLocalStorageGet('dockforge_dh_username') || '';
-
-    let username = dhUser ? dhUser.trim() : '';
-    let repoName = '';
-
-    // Determine target repository for current project / build
-    let rawRepo = '';
-    if (state.dockerImageInput && state.dockerImageInput !== 'my-username/my-service') {
-      rawRepo = state.dockerImageInput.trim();
-    } else if (state.lastLocalBuild && state.lastLocalBuild.image_name) {
-      rawRepo = state.lastLocalBuild.image_name.trim();
-    } else if (state.lastLocalBuild && state.lastLocalBuild.tag && state.lastLocalBuild.tag.includes('/')) {
-      rawRepo = state.lastLocalBuild.tag.split(':')[0].trim();
-    } else if ((state.activeProject && state.activeProject !== 'No Project Loaded') || (state.activeRepo && state.activeRepo.name && state.activeRepo.name !== 'No Project Loaded')) {
-      rawRepo = getCurrentRepoName();
-    }
-
-    if (rawRepo) {
-      if (rawRepo.includes('/')) {
-        const parts = rawRepo.split('/');
-        if (!username) {
-          username = parts[0].trim();
-        }
-        repoName = parts.slice(1).join('/').split(':')[0].trim();
-      } else {
-        repoName = rawRepo.split(':')[0].trim();
-      }
-    }
-
-    // Ignore default fallback if no actual project or image is targeted
-    if (repoName === 'dockforge' && (!state.activeProject || state.activeProject === 'No Project Loaded') && (!state.activeRepo || state.activeRepo.name === 'No Project Loaded') && !state.dockerImageInput && !state.lastLocalBuild) {
-      repoName = '';
-    }
-
-    let url = 'https://hub.docker.com';
-    let title = 'Open Docker Hub (Configure Docker Hub credentials in Settings)';
-
-    if (username && repoName) {
-      url = `https://hub.docker.com/r/${username}/${repoName}`;
-      title = `Open Docker Hub Repository: ${username}/${repoName} (${url})`;
-    } else if (username) {
-      url = `https://hub.docker.com/repositories/${username}`;
-      title = `Open Docker Hub Repositories for ${username} (${url})`;
-    } else if (repoName) {
-      url = `https://hub.docker.com/search?q=${encodeURIComponent(repoName)}`;
-      title = `Search Docker Hub for ${repoName} (${url}) - Configure credentials in Settings`;
-    }
-
-    return { url, title, username, repoName };
-  }
-
   function renderHeader() {
-    let githubUrl = 'https://github.com';
-    const repoPathVal = state.repoPath || (state.activeRepo && state.activeRepo.full_name) || '';
-    const repoUrlVal = (state.activeRepo && state.activeRepo.url) || state.currentRepoUrl || '';
-    if (repoUrlVal && repoUrlVal.startsWith('http')) {
-      githubUrl = repoUrlVal;
-    } else if (repoPathVal && repoPathVal !== 'No Project Loaded') {
-      githubUrl = repoPathVal.startsWith('http') ? repoPathVal : `https://github.com/${repoPathVal}`;
-    }
-
-    const dhConfig = getDockerHubConfig();
-    const dockerhubUrl = dhConfig.url;
-    const dockerhubTitle = dhConfig.title;
-
     return `
       <header class="relative z-30 flex flex-col shrink-0 border-b dark:bg-slate-900 bg-white dark:border-slate-800 border-slate-200 shadow-sm transition-colors">
         <div class="h-14 px-4 flex items-center justify-between">
-          <div class="flex items-center space-x-2 truncate">
-            <div class="flex items-center shrink-0">
-              <img src="/frontend/public/logo.png" alt="DockForge Logo" class="h-[45px] w-[45px] object-contain" onerror="this.onerror=null; this.src='/public/logo.png';" />
-              <span class="font-bold text-2xl dark:text-white text-slate-900 tracking-wide uppercase ml-2">DOCKFORGE</span>
+          <div class="flex items-center space-x-3 truncate">
+            <div class="flex items-center space-x-2 shrink-0">
+              <img src="/frontend/public/logo.png" alt="DockForge Logo" class="h-7 w-7 object-contain" onerror="this.onerror=null; this.src='/public/logo.png';" />
+              <span class="font-bold text-base md:text-lg dark:text-white text-slate-900 tracking-wide">DockForge</span>
             </div>
 
-            <div class="h-6 w-px dark:bg-slate-800 bg-slate-200 ml-1.5 mr-1 hidden sm:block"></div>
+            <div class="h-4 w-px dark:bg-slate-800 bg-slate-200 mx-1 hidden sm:block"></div>
 
             <!-- HEADER ACTIVE PROJECT BADGE -->
-            ${((state.activeProject && state.activeProject !== 'No Project Loaded') || (state.activeRepo && state.activeRepo.full_name && state.activeRepo.name !== 'No Project Loaded')) ? `
-              <div class="px-2.5 py-1 ml-[10px] rounded-lg border dark:border-slate-700 border-slate-300 dark:bg-slate-800 bg-slate-100 text-xs font-bold flex items-center space-x-1.5 transition shadow-sm" title="Active Project">
-                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-                <span class="font-extrabold text-xs md:text-sm tracking-wide dark:text-amber-400 text-amber-600 truncate max-w-[150px] sm:max-w-[220px] md:max-w-[280px]">
-                  ${escapeHtml(formatProjectTitle(state.activeProject || state.activeRepo.name))}
-                </span>
-              </div>
-            ` : ''}
+            <div class="px-3 py-1.5 rounded-lg border dark:border-slate-700 border-slate-300 dark:bg-slate-800 bg-slate-100 text-xs font-bold flex items-center space-x-2 transition shadow-sm" title="Active Project">
+              <span class="w-2 h-2 rounded-full ${state.activeRepo && state.activeRepo.full_name ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'} shrink-0"></span>
+              <span class="font-extrabold text-xs md:text-sm tracking-wide dark:text-amber-400 text-amber-600 truncate max-w-[150px] sm:max-w-[220px] md:max-w-[280px]">
+                ${escapeHtml(formatProjectTitle(state.activeRepo && state.activeRepo.name ? state.activeRepo.name : 'No Project Loaded'))}
+              </span>
+            </div>
           </div>
 
           <!-- Desktop Navigation Actions -->
           <div class="hidden md:flex items-center space-x-2 shrink-0">
 
             <!-- Git Actions Group -->
-            <div class="flex items-center space-x-1 p-1 mr-[5px] rounded-lg bg-slate-50/60 dark:bg-slate-800/40 border border-purple-200/80 dark:border-slate-700/50 shadow-2xs">
-              <button id="btn-pull" class="h-8 px-2.5 text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white rounded-md shadow-2xs flex items-center space-x-1.5 transition border border-purple-500/30 cursor-pointer" title="Git Pull Repository">
-                <i class="fa-solid fa-code-branch text-purple-100 text-[14px] mr-0"></i>
+            <div class="flex items-center space-x-1.5 p-1 rounded-xl bg-slate-800/60 dark:bg-slate-950/60 border dark:border-slate-800 border-slate-300/80 shadow-sm">
+              <button id="btn-pull" class="px-2.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-lg border border-slate-700/80 flex items-center space-x-1.5 transition shadow-sm cursor-pointer" title="Git Pull Repository">
+                <i class="fa-solid fa-code-branch text-blue-400 text-xs"></i>
                 <span>Git Pull</span>
               </button>
 
-              <button id="btn-push" class="h-8 px-2.5 text-xs font-semibold bg-purple-700 hover:bg-purple-600 text-white rounded-md shadow-2xs flex items-center space-x-1.5 transition border border-purple-600/30 cursor-pointer" title="Git Push / Commit Changes">
-                <i class="fa-solid fa-code-commit text-purple-100 text-[14px] mr-0"></i>
+              <button id="btn-push" class="px-2.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 rounded-lg border border-slate-700/80 flex items-center space-x-1.5 transition shadow-sm cursor-pointer" title="Git Push / Commit Changes">
+                <i class="fa-solid fa-code-commit text-emerald-400 text-xs"></i>
                 <span>Git Push</span>
               </button>
-
-              <!-- GitHub External Link Button -->
-              <a href="${escapeHtml(githubUrl)}" target="_blank" rel="noopener noreferrer" class="h-8 w-[42px] px-0 text-xs font-semibold bg-purple-800 hover:bg-purple-700 text-white rounded-md border border-purple-700/40 flex items-center justify-center transition shadow-2xs cursor-pointer" title="Open GitHub Repository (${escapeHtml(githubUrl)})">
-                <span class="w-6 h-6 rounded-full bg-white flex items-center justify-center shrink-0 shadow-2xs">
-                  <i class="fa-brands fa-github text-slate-900 text-[15px]"></i>
-                </span>
-              </a>
             </div>
 
-            <!-- Divider Line between Git and Docker groups -->
-            <div class="h-5 w-px dark:bg-slate-800 bg-slate-200 shrink-0 ml-[6px]"></div>
+            <!-- Thin Vertical Divider Line between Git and Docker groups -->
+            <div class="h-6 w-px dark:bg-slate-700/80 bg-slate-300 mx-1 shrink-0"></div>
 
             <!-- Docker Container/Image Actions Group -->
-            <div class="flex items-center space-x-1 p-1 ml-[5px] rounded-lg bg-slate-50/60 dark:bg-slate-800/40 border border-blue-200/80 dark:border-slate-700/50 shadow-2xs">
-              <button id="btn-build-image" class="h-8 px-2.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-md shadow-2xs flex items-center space-x-1.5 transition border border-blue-500/30 cursor-pointer" title="Build Docker Container Image">
-                <i class="fa-solid fa-layer-group text-blue-100 text-[15px] mr-0"></i>
+            <div class="flex items-center space-x-1.5 p-1 rounded-xl bg-blue-950/20 dark:bg-blue-950/40 border dark:border-blue-900/40 border-blue-200 shadow-sm">
+              <button id="btn-build-image" class="px-2.5 py-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg shadow-sm flex items-center space-x-1.5 transition border border-blue-500/30 cursor-pointer" title="Build Docker Container Image">
+                <i class="fa-solid fa-layer-group text-blue-200 text-xs"></i>
                 <span>Image Build</span>
               </button>
 
-              <button id="btn-push-docker" ${state.lastLocalBuild && state.lastLocalBuild.ready ? '' : 'disabled'} class="h-8 px-2.5 text-xs font-semibold ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-blue-700 hover:bg-blue-600 text-white shadow-2xs border border-blue-600/30 cursor-pointer' : 'bg-slate-100 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-800 opacity-60 cursor-not-allowed'} rounded-md flex items-center space-x-1.5 transition" title="${state.lastLocalBuild && state.lastLocalBuild.ready ? 'Push Docker Image to Registry' : 'Build an image first before pushing'}">
-                <i class="fa-solid fa-rocket ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'} text-[15px] mr-0"></i>
+              <button id="btn-push-docker" class="px-2.5 py-1.5 text-xs font-semibold ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm border border-indigo-500/30' : 'bg-indigo-600/85 hover:bg-indigo-600 text-white/90 border border-indigo-500/30'} rounded-lg flex items-center space-x-1.5 transition cursor-pointer" title="Push Docker Image to Registry">
+                <i class="fa-solid fa-rocket text-indigo-200 text-xs"></i>
                 <span>Image Push</span>
               </button>
-
-              <!-- DockerHub External Link Button -->
-              <a href="${escapeHtml(dockerhubUrl)}" target="_blank" rel="noopener noreferrer" class="h-8 w-[42px] px-0 text-xs font-semibold bg-blue-800 hover:bg-blue-700 text-white rounded-md border border-blue-700/40 flex items-center justify-center transition shadow-2xs cursor-pointer" title="${escapeHtml(dockerhubTitle)}">
-                <span class="w-6 h-6 rounded-full bg-white flex items-center justify-center shrink-0 shadow-2xs">
-                  <i class="fa-brands fa-docker text-blue-600 text-[15px]"></i>
-                </span>
-              </a>
             </div>
 
-            <!-- Divider Line between Docker and Logs/Settings groups -->
-            <div class="h-5 w-px dark:bg-slate-800 bg-slate-200 shrink-0"></div>
+            <!-- Status Indicator Badge -->
+            ${state.lastLocalBuild && state.lastLocalBuild.ready ? `
+              <div class="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center space-x-1.5 shrink-0" title="Local build ready: ${escapeHtml(state.lastLocalBuild.tag)}">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+                <span class="truncate">Build Ready: <strong class="font-mono">${escapeHtml(state.lastLocalBuild.tag)}</strong></span>
+              </div>
+            ` : `
+              <div class="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-slate-500/10 dark:text-slate-400 text-slate-500 border border-slate-500/20 flex items-center space-x-1.5 shrink-0" title="No active local image build">
+                <span class="w-2 h-2 rounded-full bg-slate-400 shrink-0"></span>
+                <span>No Active Build</span>
+              </div>
+            `}
 
-            <!-- Logs & Settings Actions Group -->
-            <div class="flex items-center space-x-1 p-1 ml-[5px] rounded-lg bg-slate-50/60 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/50 shadow-2xs">
-              <!-- Logs Button -->
-              <button id="btn-jobs" class="h-8 px-2.5 text-xs font-semibold bg-[#F1F5F9] hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300/80 flex items-center space-x-1.5 transition shadow-2xs cursor-pointer" title="Build & Push Logs">
-                <i class="fa-solid fa-list-check text-purple-700 text-[15px] mr-0"></i>
-                <span>Logs</span>
-              </button>
+            <button id="btn-jobs" class="p-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1 transition" title="Build & Push Jobs">
+              <i class="fa-solid fa-list-check text-purple-500"></i>
+            </button>
 
-              <!-- Settings Button (Icon-Only with upgraded mechanical cogwheel SVG) -->
-              <button id="btn-settings" class="h-8 w-[37px] ml-[3px] px-0 text-xs font-semibold bg-[#F1F5F9] hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300/80 flex items-center justify-center transition shadow-2xs cursor-pointer" title="Settings">
-                <svg class="w-[20px] h-[20px] text-slate-700 m-0" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                  <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.532 1.532 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.532 1.532 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
-                </svg>
-              </button>
+            <button id="btn-settings" class="p-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded-lg dark:border-slate-700 border-slate-300 flex items-center space-x-1 transition" title="Settings">
+              <i class="fa-solid fa-gear text-amber-500"></i>
+            </button>
 
-              <!-- Vertical Divider Line between Settings and Sign Out -->
-              <div class="h-4 w-px bg-slate-300 dark:bg-slate-700 my-auto shrink-0 mx-0.5"></div>
+            <div class="h-4 w-px dark:bg-slate-800 bg-slate-200 mx-1"></div>
 
-              <!-- Sign Out Button (Icon-Only, matching Settings cog) -->
-              <button id="btn-logout" class="h-8 w-[35px] text-xs font-semibold bg-[#F1F5F9] hover:bg-red-100/80 text-slate-800 rounded-md border border-slate-300/80 flex items-center justify-center transition shadow-2xs cursor-pointer" title="Sign Out">
-                <i class="fa-solid fa-right-from-bracket text-red-600 text-[15px]"></i>
-              </button>
-            </div>
+            <button id="btn-logout" class="p-2 text-red-500 hover:text-red-600 rounded-lg dark:hover:bg-slate-800 hover:bg-slate-200 transition" title="Sign Out">
+              <i class="fa-solid fa-right-from-bracket"></i>
+            </button>
           </div>
 
           <!-- Mobile Hamburger / Overflow Menu Button -->
@@ -954,13 +838,13 @@
               `}
             </div>
 
-            <button id="btn-pull-mobile" class="p-2.5 rounded-lg bg-purple-600 text-white flex items-center space-x-2 shadow-sm hover:bg-purple-500 transition active:scale-95">
-              <i class="fa-solid fa-code-branch text-purple-100 text-sm"></i>
+            <button id="btn-pull-mobile" class="p-2.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 flex items-center space-x-2 hover:bg-slate-700 transition active:scale-95">
+              <i class="fa-solid fa-code-branch text-blue-400 text-sm"></i>
               <span class="font-medium">Git Pull</span>
             </button>
 
-            <button id="btn-push-mobile" class="p-2.5 rounded-lg bg-purple-800 text-white flex items-center space-x-2 shadow-sm hover:bg-purple-700 transition active:scale-95">
-              <i class="fa-solid fa-code-commit text-purple-100 text-sm"></i>
+            <button id="btn-push-mobile" class="p-2.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 flex items-center space-x-2 hover:bg-slate-700 transition active:scale-95">
+              <i class="fa-solid fa-code-commit text-emerald-400 text-sm"></i>
               <span class="font-medium">Git Push</span>
             </button>
 
@@ -976,27 +860,13 @@
 
             <button id="btn-jobs-mobile" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95">
               <i class="fa-solid fa-list-check text-purple-500 text-sm"></i>
-              <span class="font-medium">Logs</span>
+              <span class="font-medium">Jobs</span>
             </button>
 
             <button id="btn-settings-mobile" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95">
               <i class="fa-solid fa-gear text-amber-500 text-sm"></i>
               <span class="font-medium">Settings</span>
             </button>
-
-            <a href="${escapeHtml(githubUrl)}" target="_blank" rel="noopener noreferrer" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95">
-              <span class="w-5 h-5 rounded-full bg-slate-900 dark:bg-white flex items-center justify-center shrink-0">
-                <i class="fa-brands fa-github text-white dark:text-slate-900 text-xs"></i>
-              </span>
-              <span class="font-medium">GitHub</span>
-            </a>
-
-            <a href="${escapeHtml(dockerhubUrl)}" target="_blank" rel="noopener noreferrer" class="p-2.5 rounded-lg dark:bg-slate-800 bg-white border dark:border-slate-700 border-slate-300 dark:text-slate-200 text-slate-800 flex items-center space-x-2 hover:bg-slate-200 dark:hover:bg-slate-700 transition active:scale-95" title="${escapeHtml(dockerhubTitle)}">
-              <span class="w-5 h-5 rounded-full bg-blue-500/20 dark:bg-white flex items-center justify-center shrink-0">
-                <i class="fa-brands fa-docker text-blue-600 text-xs"></i>
-              </span>
-              <span class="font-medium">DockerHub</span>
-            </a>
 
             <button id="btn-logout-mobile" class="col-span-2 p-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-500 flex items-center justify-center space-x-2 hover:bg-red-500/20 transition active:scale-95">
               <i class="fa-solid fa-right-from-bracket text-sm"></i>
@@ -1043,15 +913,15 @@
         <!-- FULL REPOSITORY SUB-HEADER IN SIDEBAR -->
         <div class="px-3 py-2 border-b dark:border-slate-800 border-slate-200 dark:bg-slate-950/60 bg-slate-100/80 flex items-center justify-between text-xs">
           <div class="flex items-center space-x-1.5 truncate min-w-0 pr-1">
-            <i class="fa-brands fa-github text-slate-400 shrink-0 text-[18px]"></i>
-            <span class="font-mono font-bold dark:text-slate-200 text-slate-800 truncate text-xs" title="${escapeHtml(state.repoPath || (state.activeRepo && state.activeRepo.full_name ? state.activeRepo.full_name : 'No Repository Loaded'))}">
-              ${escapeHtml(state.repoPath || (state.activeRepo && state.activeRepo.full_name ? state.activeRepo.full_name : 'No Repository Loaded'))}
+            <i class="fa-brands fa-github text-slate-400 shrink-0 text-xs"></i>
+            <span class="font-mono font-bold dark:text-slate-200 text-slate-800 truncate text-xs" title="${escapeHtml(state.activeRepo && state.activeRepo.full_name ? state.activeRepo.full_name : 'No Repository Loaded')}">
+              ${escapeHtml(state.activeRepo && state.activeRepo.full_name ? state.activeRepo.full_name : 'No Repository Loaded')}
             </span>
           </div>
-          ${(state.activeBranch || (state.activeRepo && state.activeRepo.branch)) && (state.repoPath || (state.activeRepo && state.activeRepo.full_name)) ? `
+          ${state.activeRepo && state.activeRepo.branch && state.activeRepo.full_name ? `
             <span class="px-1.5 py-0.5 text-[10px] font-mono rounded bg-blue-500/10 text-blue-500 dark:text-blue-400 border border-blue-500/20 shrink-0 flex items-center space-x-1" title="Active Branch">
               <i class="fa-solid fa-code-branch text-[9px]"></i>
-              <span>${escapeHtml(state.activeBranch || state.activeRepo.branch)}</span>
+              <span>${escapeHtml(state.activeRepo.branch)}</span>
             </span>
           ` : ''}
         </div>
@@ -1073,36 +943,22 @@
             </button>
           </div>
         </div>
-        <div id="workspace-tree-container" class="flex-1 overflow-y-auto p-2 text-xs space-y-0.5 webkit-overflow-scrolling-touch rounded-lg transition-all duration-150 relative min-h-[150px]" title="Drag items here or drop onto folders to move them">
+        <div class="flex-1 overflow-y-auto p-2 text-xs space-y-0.5 webkit-overflow-scrolling-touch">
           ${renderTreeNodes(state.files)}
         </div>
       </aside>
     `;
   }
 
-  function renderTreeNodes(nodes, depth = 0, parentPath = '') {
+  function renderTreeNodes(nodes, depth = 0) {
     if (!nodes || nodes.length === 0) {
       if (depth === 0) {
-        return `<div class="p-4 text-center dark:text-slate-500 text-slate-400 select-none">Workspace is empty.<br>Pull a repo or create files.</div>`;
+        return `<div class="p-4 text-center dark:text-slate-500 text-slate-400">Workspace is empty.<br>Pull a repo or create files.</div>`;
       }
       return '';
     }
 
-    const dirOrder = state.treeOrder ? (state.treeOrder[parentPath] || []) : [];
-    let sortedNodes = [...nodes];
-    if (dirOrder && dirOrder.length > 0) {
-      sortedNodes.sort((a, b) => {
-        const idxA = dirOrder.indexOf(a.name);
-        const idxB = dirOrder.indexOf(b.name);
-        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-        if (idxA !== -1) return -1;
-        if (idxB !== -1) return 1;
-        if (a.type === b.type) return a.name.localeCompare(b.name);
-        return a.type === 'folder' ? -1 : 1;
-      });
-    }
-
-    return sortedNodes.map(node => {
+    return nodes.map(node => {
       const isFolder = node.type === 'folder';
       const isExpanded = state.expandedFolders.has(node.path);
       const paddingLeft = `${depth * 12 + 8}px`;
@@ -1110,24 +966,17 @@
       if (isFolder) {
         return `
           <div>
-            <div class="tree-node tree-folder flex items-center justify-between px-2.5 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 dark:text-slate-300 text-slate-700 dark:hover:text-white hover:text-slate-900 cursor-grab active:cursor-grabbing group transition-all duration-150 select-none"
-                 style="padding-left: ${paddingLeft}"
-                 draggable="true"
-                 data-drag-path="${escapeHtml(node.path)}"
-                 data-is-folder="true"
-                 data-node-name="${escapeHtml(node.name)}"
-                 data-parent-path="${escapeHtml(parentPath)}"
-                 data-folder-path="${escapeHtml(node.path)}"
-                 title="Drag folder to reorder or move into directory">
-              <div class="flex items-center space-x-1.5 truncate pr-2 min-w-0 pointer-events-none">
+            <div class="flex items-center justify-between px-2 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 dark:text-slate-300 text-slate-700 dark:hover:text-white hover:text-slate-900 cursor-pointer group"
+                 style="padding-left: ${paddingLeft}" data-folder-path="${escapeHtml(node.path)}">
+              <div class="flex items-center space-x-1.5 truncate pr-2 min-w-0">
                 <i class="fa-solid ${isExpanded ? 'fa-folder-open text-amber-400' : 'fa-folder text-amber-500'} shrink-0"></i>
                 <span class="truncate font-medium">${escapeHtml(node.name)}</span>
               </div>
-              <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition shrink-0 pointer-events-auto" data-delete-path="${escapeHtml(node.path)}" data-is-folder="true" title="Delete Folder">
+              <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition shrink-0" data-delete-path="${escapeHtml(node.path)}" data-is-folder="true" title="Delete Folder">
                 <i class="fa-solid fa-xmark"></i>
               </button>
             </div>
-            ${isExpanded ? renderTreeNodes(node.children, depth + 1, node.path) : ''}
+            ${isExpanded ? renderTreeNodes(node.children, depth + 1) : ''}
           </div>
         `;
       }
@@ -1144,20 +993,13 @@
       else if (ext === 'md') icon = 'fa-file-lines text-slate-400';
 
       return `
-        <div class="tree-node tree-file flex items-center justify-between px-2.5 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 cursor-grab active:cursor-grabbing group transition-all duration-150 select-none ${isActive ? 'bg-blue-600/20 text-blue-600 dark:text-blue-400 font-semibold' : 'dark:text-slate-400 text-slate-600 dark:hover:text-slate-200 hover:text-slate-900'}"
-             style="padding-left: ${paddingLeft}"
-             draggable="true"
-             data-drag-path="${escapeHtml(node.path)}"
-             data-is-folder="false"
-             data-node-name="${escapeHtml(node.name)}"
-             data-parent-path="${escapeHtml(parentPath)}"
-             data-file-path="${escapeHtml(node.path)}"
-             title="Drag file to reorder or move into directory">
-          <div class="flex items-center space-x-2 truncate pr-2 min-w-0 pointer-events-none">
+        <div class="flex items-center justify-between px-2 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 cursor-pointer group ${isActive ? 'bg-blue-600/20 text-blue-600 dark:text-blue-400 font-semibold' : 'dark:text-slate-400 text-slate-600 dark:hover:text-slate-200 hover:text-slate-900'}"
+             style="padding-left: ${paddingLeft}" data-file-path="${escapeHtml(node.path)}">
+          <div class="flex items-center space-x-2 truncate pr-2 min-w-0">
             <i class="fa-solid ${icon} shrink-0"></i>
             <span class="truncate">${escapeHtml(node.name)}</span>
           </div>
-          <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition shrink-0 pointer-events-auto" data-delete-path="${escapeHtml(node.path)}" data-is-folder="false" title="Delete File">
+          <button class="btn-delete-file opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition shrink-0" data-delete-path="${escapeHtml(node.path)}" data-is-folder="false" title="Delete File">
             <i class="fa-solid fa-xmark"></i>
           </button>
         </div>
@@ -1350,8 +1192,9 @@
 
   function renderTerminalLogs(isMobileStandalone = false) {
     const isFull = isMobileStandalone || state.terminalMaximized || state.mobileTab === 'console';
-    const containerClass = 'flex-1 w-full h-full bg-slate-900 flex flex-col min-h-0 relative overflow-hidden';
-    const isAutoScrolling = state.terminalAutoScroll !== false;
+    const containerClass = isFull
+      ? 'flex-1 w-full h-full bg-slate-900 flex flex-col min-h-0'
+      : 'h-56 md:h-64 bg-slate-900 border-t border-slate-800 flex flex-col shrink-0';
 
     return `
       <div class="${containerClass}">
@@ -1359,33 +1202,17 @@
           <div class="flex items-center space-x-2">
             <i class="fa-solid fa-terminal text-blue-400"></i>
             <span class="font-semibold uppercase tracking-wider text-slate-300">Build Console & Log Stream</span>
-            ${!isAutoScrolling ? `
-              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                <i class="fa-solid fa-pause text-[9px] mr-1"></i> Scroll Paused
-              </span>
-            ` : ''}
           </div>
           <div class="flex items-center space-x-2">
-            ${!isAutoScrolling ? `
-              <button id="btn-terminal-resume-autoscroll" class="px-2 py-0.5 text-[11px] bg-blue-600 hover:bg-blue-500 text-white rounded flex items-center space-x-1 transition shadow-sm" title="Jump to Bottom & Resume Auto-scroll">
-                <i class="fa-solid fa-arrow-down text-[10px]"></i>
-                <span>Scroll to Bottom</span>
-              </button>
-            ` : ''}
-            <button id="btn-copy-logs" class="p-1 hover:text-white transition text-slate-400 hover:text-slate-200" title="Copy Console Logs">
-              <i class="fa-solid fa-copy"></i>
-            </button>
-            <button id="btn-clear-logs" class="p-1 hover:text-white transition text-slate-400 hover:text-slate-200" title="Clear Console">
+            <button id="btn-clear-logs" class="p-1 hover:text-white transition" title="Clear Console">
               <i class="fa-solid fa-trash-can"></i>
             </button>
-            <button id="btn-toggle-terminal-max" class="p-1 hover:text-white transition hidden md:inline-block text-slate-400 hover:text-slate-200" title="${state.terminalMaximized ? 'Restore View' : 'Maximize Console'}">
+            <button id="btn-toggle-terminal-max" class="p-1 hover:text-white transition hidden md:inline-block" title="${state.terminalMaximized ? 'Restore View' : 'Maximize Console'}">
               <i class="fa-solid ${state.terminalMaximized ? 'fa-compress' : 'fa-expand'} text-xs"></i>
             </button>
           </div>
         </div>
-        <div class="flex-1 relative min-h-0 h-full w-full overflow-hidden bg-slate-950">
-          <pre id="terminal-logs-body" class="absolute inset-0 p-4 overflow-y-auto font-mono text-xs text-emerald-400 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch min-h-0 max-h-full">${escapeHtml(state.activeJobLogs || 'Ready. Click "Image Build" to compile image and stream logs.')}<div id="terminal-scroll-anchor" class="h-0 w-0"></div></pre>
-        </div>
+        <pre id="terminal-logs-body" class="flex-1 p-4 overflow-y-auto font-mono text-xs text-emerald-400 bg-slate-950 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch">${escapeHtml(state.activeJobLogs || 'Ready. Click "Build Docker" to compile image and stream logs.')}</pre>
       </div>
     `;
   }
@@ -1630,124 +1457,39 @@
     `;
   }
 
-  function getCurrentRepoName() {
-    if (state.activeRepo?.name && state.activeRepo.name !== 'No Project Loaded') {
-      return state.activeRepo.name.toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-    }
-    if (state.activeRepo?.full_name && state.activeRepo.full_name.includes('/')) {
-      return state.activeRepo.full_name.split('/')[1].toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-    }
-    if (state.currentRepoUrl) {
-      const clean = state.currentRepoUrl.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
-      if (clean.includes('/')) {
-        return clean.split('/').pop().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-      }
-    }
-    return 'dockforge';
-  }
-
-  function parseRepoAndTag(rawInput) {
-    const dhUser = (state.settings && (state.settings.dockerhub_username || state.settings.docker_username || state.settings.dockerHubUsername || state.settings.username)) ||
-                   (state.currentCredentials && (state.currentCredentials.dockerhub_username || state.currentCredentials.docker_username)) ||
-                   safeLocalStorageGet('dockforge_dh_username') || '';
-    const currentWorkspaceName = getCurrentRepoName();
-
-    let input = (rawInput || '').trim();
-
-    if (input === 'my-username/my-service' || input === 'dockforge' || input === 'docker-image-builder') {
-      input = '';
-    }
-
-    if (!input) {
-      if (state.lastLocalBuild && state.lastLocalBuild.tag) {
-        input = state.lastLocalBuild.tag.trim();
-      } else if (state.dockerTargetImageTagInput) {
-        input = state.dockerTargetImageTagInput.trim();
-      }
-    }
-
-    let repo = '';
-    let tag = state.dockerTagInput && state.dockerTagInput !== 'latest' ? state.dockerTagInput : 'latest';
-
-    if (input) {
-      if (input.includes(':')) {
-        const parts = input.split(':');
-        repo = parts[0].trim();
-        tag = parts[1].trim() || tag;
-      } else {
-        repo = input;
-      }
-    }
-
-    if (repo && repo !== 'my-username/my-service') {
-      if (repo.includes('/')) {
-        // Already contains slash, e.g. mattomeo15/ip-freely
-      } else if (dhUser) {
-        repo = `${dhUser}/${repo}`;
-      }
-    } else {
-      repo = dhUser ? `${dhUser}/${currentWorkspaceName}` : currentWorkspaceName;
-    }
-
-    return { repo, tag };
-  }
-
-  function getJobTypeBadge(actionType) {
-    const type = (actionType || 'build').toLowerCase();
-    if (type === 'build' || type === 'docker_build') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20"><i class="fa-solid fa-layer-group text-[9px] mr-1"></i>BUILD</span>`;
-    } else if (type === 'push' || type === 'docker_push') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20"><i class="fa-solid fa-rocket text-[9px] mr-1"></i>PUSH</span>`;
-    } else if (type === 'git_pull' || type === 'pull') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i class="fa-solid fa-code-branch text-[9px] mr-1"></i>GIT PULL</span>`;
-    } else if (type === 'git_push') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"><i class="fa-solid fa-code-commit text-[9px] mr-1"></i>GIT PUSH</span>`;
-    }
-    return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-slate-500/10 text-slate-400 border border-slate-500/20">${escapeHtml(type.toUpperCase())}</span>`;
-  }
-
   function renderBuildModal() {
-    const dhUser = state.settings?.dockerhub_username || state.settings?.docker_username || state.settings?.username || '';
-    const currentRepoName = getCurrentRepoName();
-    const defaultTag = dhUser ? `${dhUser}/${currentRepoName}:latest` : `${currentRepoName}:latest`;
-    const currentTargetTag = state.dockerTargetImageTagInput || defaultTag;
-
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
         <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
-              <i class="fa-solid fa-layer-group text-blue-500"></i>
-              <span>Build Container Image</span>
+              <i class="fa-solid fa-box text-blue-500"></i>
+              <span>Build Local Docker Image</span>
             </h3>
             <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
           </div>
 
           <form id="form-build-image" class="space-y-4">
             <div>
-              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Target Image Tag</label>
-              <input type="text" id="build-target-image-tag" value="${escapeHtml(currentTargetTag)}" required placeholder="e.g. username/repository:tag or dockforge:latest"
-                     class="w-full px-3 py-2.5 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-              <p class="text-[11px] text-slate-400 mt-1.5">Defaulted to <code class="text-blue-400 font-mono">${escapeHtml(defaultTag)}</code>. You can customize this tag before building.</p>
+              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Local Image Tag</label>
+              <input type="text" id="build-local-tag" value="${escapeHtml(state.dockerLocalTagInput || 'latest')}" required placeholder="e.g. latest, dev-build"
+                     class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none" />
             </div>
 
-            <div class="p-3 rounded-lg dark:bg-slate-800/60 bg-slate-100 border dark:border-slate-700/60 border-slate-200 text-xs dark:text-slate-300 text-slate-600 space-y-1.5">
-              <p class="font-medium text-slate-300 flex items-center space-x-1.5">
-                <i class="fa-solid fa-info-circle text-blue-400"></i>
-                <span>Build Specifications:</span>
-              </p>
-              <ul class="list-disc list-inside space-y-1 text-[11px] text-slate-400">
-                <li>Context Directory: <span class="font-mono text-slate-300">/workspace</span></li>
-                <li>Dockerfile: <span class="font-mono text-slate-300">Dockerfile</span></li>
-                <li>Action: <span class="text-emerald-400 font-medium">Local Docker Compile Only</span> (Decoupled from Push)</li>
+            <div class="p-3 rounded-lg dark:bg-slate-800/60 bg-slate-100 border dark:border-slate-700/60 border-slate-200 text-xs dark:text-slate-300 text-slate-600 space-y-1">
+              <p class="font-medium text-slate-300">Build Details:</p>
+              <ul class="list-disc list-inside space-y-0.5 text-[11px] text-slate-400">
+                <li>Local Tag: <span class="font-mono text-blue-400">dockforge:${escapeHtml(state.dockerLocalTagInput || 'latest')}</span></li>
+                <li>Context: Workspace Root Directory</li>
+                <li>Logs stream directly to Build Console in real-time.</li>
               </ul>
             </div>
 
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
-              <button type="submit" class="px-4 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm transition">
+              <button type="submit" class="px-4 py-2 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
                 <i class="fa-solid fa-play text-xs"></i>
-                <span>Start Build</span>
+                <span>Build Local Image</span>
               </button>
             </div>
           </form>
@@ -1758,20 +1500,7 @@
 
   function renderPushDockerModal() {
     const dhUser = state.settings?.dockerhub_username || state.settings?.docker_username || '';
-
-    let inputToParse = state.dockerImageInput;
-    if (!inputToParse || inputToParse === 'my-username/my-service') {
-      inputToParse = (state.lastLocalBuild && state.lastLocalBuild.tag) || state.dockerTargetImageTagInput || '';
-    }
-
-    const { repo: currentRepoValue, tag: currentTagValue } = parseRepoAndTag(
-      inputToParse && state.dockerTagInput ? `${inputToParse}:${state.dockerTagInput}` : inputToParse
-    );
-
-    state.dockerImageInput = currentRepoValue;
-    state.dockerTagInput = currentTagValue;
-
-    const hasSelectedInList = state.dockerHubRepos.some(r => r.full_name === currentRepoValue);
+    const lastBuildTag = state.lastLocalBuild?.tag || 'latest';
 
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
@@ -1788,7 +1517,7 @@
           <div class="p-3 mb-4 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs">
             <div class="flex items-center space-x-2">
               <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
-              <span class="dark:text-emerald-300 text-emerald-800 font-medium">Source Image: <strong id="push-source-image-banner" class="font-mono">${escapeHtml(currentRepoValue)}:${escapeHtml(currentTagValue)}</strong></span>
+              <span class="dark:text-emerald-300 text-emerald-800 font-medium">Source Image: <strong class="font-mono">dockforge:${escapeHtml(lastBuildTag)}</strong></span>
             </div>
             <span class="text-[11px] text-emerald-400/80 font-mono">Ready for registry upload</span>
           </div>
@@ -1818,15 +1547,14 @@
               ${state.dockerHubRepos && state.dockerHubRepos.length > 0 ? `
                 <select id="select-push-dockerhub-repo" class="w-full px-3 py-2 mb-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none cursor-pointer">
                   <option value="">-- Select Docker Hub Repository --</option>
-                  ${!hasSelectedInList && currentRepoValue ? `<option value="${escapeHtml(currentRepoValue)}" selected>📦 ${escapeHtml(currentRepoValue)} (Active Image)</option>` : ''}
                   ${state.dockerHubRepos.map(r => {
-                    const selected = currentRepoValue === r.full_name ? 'selected' : '';
+                    const selected = state.dockerImageInput === r.full_name ? 'selected' : '';
                     const icon = r.is_private ? '🔒' : '🌐';
                     return `<option value="${escapeHtml(r.full_name)}" ${selected}>${icon} ${escapeHtml(r.full_name)}</option>`;
                   }).join('')}
                 </select>
               ` : ''}
-              <input type="text" id="push-docker-repo" value="${escapeHtml(currentRepoValue)}" required placeholder="username/repository (e.g. user/my-app)"
+              <input type="text" id="push-docker-repo" value="${escapeHtml(state.dockerImageInput)}" required placeholder="username/repository (e.g. user/my-app)"
                      class="w-full px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none" />
             </div>
 
@@ -1836,7 +1564,7 @@
                 ${state.loadingDockerHubTags ? `<span class="text-[11px] text-purple-400 flex items-center space-x-1"><i class="fa-solid fa-spinner animate-spin"></i> <span>Loading tags...</span></span>` : ''}
               </div>
               <div class="flex space-x-2">
-                <input type="text" id="push-docker-tag" value="${escapeHtml(currentTagValue)}" required placeholder="e.g. latest, v1.0.0"
+                <input type="text" id="push-docker-tag" value="${escapeHtml(state.dockerTagInput || lastBuildTag)}" required placeholder="e.g. latest, v1.0.0"
                        class="flex-1 px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs focus:ring-2 focus:ring-purple-500 focus:outline-none" />
                 <select id="select-push-tag-preset" class="px-3 py-2 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg dark:text-white text-slate-900 text-xs cursor-pointer min-w-[120px]">
                   <option value="">Select Tag</option>
@@ -1848,7 +1576,7 @@
               </div>
             </div>
 
-            <p class="text-[11px] dark:text-slate-400 text-slate-500">Pushes <span id="push-summary-text" class="font-mono text-purple-400">${escapeHtml(currentRepoValue)}:${escapeHtml(currentTagValue)}</span> to Docker Hub registry.</p>
+            <p class="text-[11px] dark:text-slate-400 text-slate-500">Tags local image <span class="font-mono text-purple-400">dockforge:${escapeHtml(lastBuildTag)}</span> and pushes to selected Docker Hub repository.</p>
             <div class="flex justify-end space-x-2 pt-2">
               <button type="button" class="btn-close-modal px-4 py-2 text-xs font-medium dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-300 text-slate-700 rounded-lg">Cancel</button>
               <button type="submit" class="px-4 py-2 text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white rounded-lg flex items-center space-x-1.5 shadow-sm">
@@ -1878,19 +1606,17 @@
               <thead>
                 <tr class="border-b dark:border-slate-800 border-slate-200 dark:text-slate-400 text-slate-500 uppercase tracking-wider">
                   <th class="py-2.5 px-3">Job ID</th>
-                  <th class="py-2.5 px-3">Type</th>
-                  <th class="py-2.5 px-3">Image / Target</th>
+                  <th class="py-2.5 px-3">Image Target</th>
                   <th class="py-2.5 px-3">Status</th>
                   <th class="py-2.5 px-3">Started</th>
                   <th class="py-2.5 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody class="divide-y dark:divide-slate-800/50 divide-slate-200">
-                ${state.jobs.length === 0 ? `<tr><td colspan="6" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
+                ${state.jobs.length === 0 ? `<tr><td colspan="5" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
                 ${state.jobs.map(j => `
                   <tr class="dark:hover:bg-slate-800/50 hover:bg-slate-100">
                     <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600">${j.id}</td>
-                    <td class="py-2.5 px-3">${getJobTypeBadge(j.job_type || j.action)}</td>
                     <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900">${j.image_name}:${j.tag}</td>
                     <td class="py-2.5 px-3">${getStatusPill(j.status)}</td>
                     <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500">${new Date(j.started_at).toLocaleTimeString()}</td>
@@ -2081,367 +1807,6 @@
     });
   }
 
-  // --- WORKSPACE DRAG & DROP UTILITIES ---
-  function getParentFolderPath(filePath) {
-    if (!filePath) return '';
-    const parts = filePath.split('/');
-    parts.pop();
-    return parts.join('/');
-  }
-
-  function isValidRootTarget(srcPath) {
-    if (!srcPath) return false;
-    return srcPath.includes('/');
-  }
-
-  function highlightRootTarget(container, isHighlighted) {
-    if (isHighlighted) {
-      container.classList.add('ring-2', 'ring-blue-500/80', 'bg-blue-500/10', 'border-2', 'border-dashed', 'border-blue-500/60');
-    } else {
-      container.classList.remove('ring-2', 'ring-blue-500/80', 'bg-blue-500/10', 'border-2', 'border-dashed', 'border-blue-500/60');
-    }
-  }
-
-  function cleanupDropTargetHighlights() {
-    document.querySelectorAll('.tree-node').forEach(el => {
-      el.classList.remove(
-        'border-t-2', 'border-b-2', 'border-blue-500', 'shadow-sm',
-        'ring-2', 'ring-blue-500', 'bg-blue-500/20', 'dark:bg-blue-500/30',
-        'text-blue-600', 'dark:text-blue-300', 'shadow-md',
-        'ring-amber-400', 'bg-amber-400/20', 'dark:bg-amber-400/30', 'animate-pulse'
-      );
-      const pulsingIcon = el.querySelector('.fa-folder-open.animate-pulse');
-      if (pulsingIcon) {
-        pulsingIcon.classList.remove('fa-folder-open', 'text-amber-400', 'animate-pulse');
-        pulsingIcon.classList.add('fa-folder', 'text-amber-500');
-      }
-    });
-    const container = document.getElementById('workspace-tree-container');
-    if (container) highlightRootTarget(container, false);
-  }
-
-  let autoExpandTimer = null;
-  let autoExpandTargetPath = null;
-
-  function clearAutoExpand() {
-    if (autoExpandTimer) {
-      clearTimeout(autoExpandTimer);
-      autoExpandTimer = null;
-    }
-    autoExpandTargetPath = null;
-  }
-
-  async function handleReorderOrMove(srcPath, targetPath, targetIsFolder, targetName, targetParentPath, position) {
-    if (!srcPath) return;
-
-    const srcName = srcPath.split('/').pop();
-    const srcParentPath = getParentFolderPath(srcPath);
-
-    let newParentPath = '';
-    let newPath = '';
-
-    if (position === 'inside') {
-      newParentPath = targetPath;
-      newPath = newParentPath ? `${newParentPath}/${srcName}` : srcName;
-    } else {
-      newParentPath = targetParentPath || '';
-      newPath = newParentPath ? `${newParentPath}/${srcName}` : srcName;
-    }
-
-    // Check invalid move: folder into itself or subfolder
-    if (state.draggedIsFolder && position === 'inside' && (targetPath === srcPath || targetPath.startsWith(srcPath + '/'))) {
-      showToast("Cannot move a folder into itself or its own subfolder", true);
-      return;
-    }
-
-    try {
-      // 1. If path changed, call file move backend
-      if (srcPath !== newPath) {
-        const res = await apiFetch('/api/files/move', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ old_path: srcPath, new_path: newPath })
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data.detail || 'Failed to move item', true);
-          return;
-        }
-
-        // Update active open tabs
-        state.openTabs.forEach(tab => {
-          if (tab.path === srcPath) {
-            tab.path = newPath;
-            tab.name = srcName;
-          } else if (tab.path.startsWith(srcPath + '/')) {
-            tab.path = newPath + tab.path.slice(srcPath.length);
-          }
-        });
-        if (state.activeTabPath === srcPath) {
-          state.activeTabPath = newPath;
-        } else if (state.activeTabPath && state.activeTabPath.startsWith(srcPath + '/')) {
-          state.activeTabPath = newPath + state.activeTabPath.slice(srcPath.length);
-        }
-
-        // Update expanded folders
-        if (state.expandedFolders.has(srcPath)) {
-          state.expandedFolders.delete(srcPath);
-          state.expandedFolders.add(newPath);
-        }
-        if (newParentPath) {
-          state.expandedFolders.add(newParentPath);
-        }
-      }
-
-      // 2. Update order map for newParentPath
-      if (!state.treeOrder) state.treeOrder = {};
-
-      function getChildrenNames(parentPath) {
-        if (!state.files) return [];
-        if (!parentPath) return state.files.map(f => f.name);
-        const parts = parentPath.split('/');
-        let curr = state.files;
-        for (const part of parts) {
-          const found = curr.find(item => item.name === part && item.type === 'folder');
-          if (found && found.children) {
-            curr = found.children;
-          } else {
-            return [];
-          }
-        }
-        return curr.map(f => f.name);
-      }
-
-      let orderList = state.treeOrder[newParentPath]
-        ? [...state.treeOrder[newParentPath]]
-        : getChildrenNames(newParentPath);
-
-      // Remove srcName if already present
-      orderList = orderList.filter(n => n !== srcName);
-
-      if (position === 'inside') {
-        orderList.push(srcName);
-      } else if (position === 'before') {
-        const targetIdx = orderList.indexOf(targetName);
-        if (targetIdx !== -1) {
-          orderList.splice(targetIdx, 0, srcName);
-        } else {
-          orderList.unshift(srcName);
-        }
-      } else if (position === 'after') {
-        const targetIdx = orderList.indexOf(targetName);
-        if (targetIdx !== -1) {
-          orderList.splice(targetIdx + 1, 0, srcName);
-        } else {
-          orderList.push(srcName);
-        }
-      }
-
-      state.treeOrder[newParentPath] = orderList;
-
-      if (srcParentPath !== newParentPath && state.treeOrder[srcParentPath]) {
-        state.treeOrder[srcParentPath] = state.treeOrder[srcParentPath].filter(n => n !== srcName);
-      }
-
-      // 3. Persist order map to backend
-      await apiFetch('/api/workspace/order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ parent_path: newParentPath, order: orderList })
-      }).catch(err => console.error('Failed to persist order:', err));
-
-      // 4. Toast notification
-      if (position === 'inside') {
-        showToast(targetName ? `Moved "${srcName}" into "${targetName}"` : `Moved "${srcName}" to root`);
-      } else if (position === 'before') {
-        showToast(`Moved "${srcName}" before "${targetName}"`);
-      } else if (position === 'after') {
-        showToast(`Moved "${srcName}" after "${targetName}"`);
-      }
-
-      // 5. Reload tree with new custom order
-      await loadWorkspaceTree(false);
-    } catch (err) {
-      console.error('Reorder/move error:', err);
-      showToast(err.message || 'Failed to reorder item', true);
-    }
-  }
-
-  function initWorkspaceDragAndDrop() {
-    const draggables = document.querySelectorAll('[draggable="true"]');
-    draggables.forEach(el => {
-      el.addEventListener('dragstart', (e) => {
-        if (e.target.closest('.btn-delete-file')) {
-          e.preventDefault();
-          return;
-        }
-        const path = el.getAttribute('data-drag-path');
-        const isFolder = el.getAttribute('data-is-folder') === 'true';
-        state.draggedPath = path;
-        state.draggedIsFolder = isFolder;
-
-        e.dataTransfer.setData('text/plain', path);
-        e.dataTransfer.effectAllowed = 'move';
-
-        setTimeout(() => {
-          el.classList.add('opacity-40', 'scale-[0.98]', 'bg-blue-500/10');
-        }, 0);
-      });
-
-      el.addEventListener('dragend', () => {
-        el.classList.remove('opacity-40', 'scale-[0.98]', 'bg-blue-500/10');
-        state.draggedPath = null;
-        state.draggedIsFolder = false;
-        clearAutoExpand();
-        cleanupDropTargetHighlights();
-      });
-    });
-
-    const treeNodes = document.querySelectorAll('.tree-node');
-    treeNodes.forEach(nodeEl => {
-      const targetPath = nodeEl.getAttribute('data-drag-path');
-      const targetIsFolder = nodeEl.getAttribute('data-is-folder') === 'true';
-      const targetName = nodeEl.getAttribute('data-node-name');
-      const targetParentPath = nodeEl.getAttribute('data-parent-path') || '';
-
-      const getDropPosition = (e) => {
-        const rect = nodeEl.getBoundingClientRect();
-        const relY = e.clientY - rect.top;
-        const ratio = relY / rect.height;
-
-        if (targetIsFolder) {
-          if (ratio < 0.25) return 'before';
-          if (ratio > 0.75) return 'after';
-          return 'inside';
-        } else {
-          return ratio < 0.5 ? 'before' : 'after';
-        }
-      };
-
-      const updateHighlight = (position) => {
-        cleanupDropTargetHighlights();
-        if (position === 'before') {
-          nodeEl.classList.add('border-t-2', 'border-blue-500', 'shadow-sm');
-        } else if (position === 'after') {
-          nodeEl.classList.add('border-b-2', 'border-blue-500', 'shadow-sm');
-        } else if (position === 'inside') {
-          nodeEl.classList.add('ring-2', 'ring-blue-500', 'bg-blue-500/20', 'dark:bg-blue-500/30', 'text-blue-600', 'dark:text-blue-300', 'shadow-md');
-        }
-      };
-
-      const triggerFolderAutoExpand = (position) => {
-        if (targetIsFolder && !state.expandedFolders.has(targetPath)) {
-          if (autoExpandTargetPath !== targetPath) {
-            clearAutoExpand();
-            autoExpandTargetPath = targetPath;
-
-            // Visual feedback on the collapsed folder element
-            nodeEl.classList.add('ring-2', 'ring-amber-400', 'bg-amber-400/20', 'dark:bg-amber-400/30', 'animate-pulse');
-            const icon = nodeEl.querySelector('.fa-folder');
-            if (icon) {
-              icon.classList.remove('fa-folder', 'text-amber-500');
-              icon.classList.add('fa-folder-open', 'text-amber-400', 'animate-pulse');
-            }
-
-            autoExpandTimer = setTimeout(() => {
-              if (state.draggedPath && autoExpandTargetPath === targetPath) {
-                state.expandedFolders.add(targetPath);
-                clearAutoExpand();
-                render();
-              }
-            }, 500);
-          }
-        } else if (autoExpandTargetPath && autoExpandTargetPath !== targetPath) {
-          clearAutoExpand();
-        }
-      };
-
-      nodeEl.addEventListener('dragenter', (e) => {
-        if (!state.draggedPath || state.draggedPath === targetPath) return;
-        if (state.draggedIsFolder && (targetPath === state.draggedPath || targetPath.startsWith(state.draggedPath + '/'))) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const position = getDropPosition(e);
-        updateHighlight(position);
-        triggerFolderAutoExpand(position);
-      });
-
-      nodeEl.addEventListener('dragover', (e) => {
-        if (!state.draggedPath || state.draggedPath === targetPath) return;
-        if (state.draggedIsFolder && (targetPath === state.draggedPath || targetPath.startsWith(state.draggedPath + '/'))) return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = 'move';
-        const position = getDropPosition(e);
-        updateHighlight(position);
-        triggerFolderAutoExpand(position);
-      });
-
-      nodeEl.addEventListener('dragleave', (e) => {
-        const rect = nodeEl.getBoundingClientRect();
-        if (e.clientX < rect.left || e.clientX >= rect.right || e.clientY < rect.top || e.clientY >= rect.bottom) {
-          if (autoExpandTargetPath === targetPath) {
-            clearAutoExpand();
-          }
-          cleanupDropTargetHighlights();
-        }
-      });
-
-      nodeEl.addEventListener('drop', (e) => {
-        if (!state.draggedPath || state.draggedPath === targetPath) return;
-        if (state.draggedIsFolder && (targetPath === state.draggedPath || targetPath.startsWith(state.draggedPath + '/'))) return;
-        e.preventDefault();
-        e.stopPropagation();
-
-        clearAutoExpand();
-        const position = getDropPosition(e);
-        cleanupDropTargetHighlights();
-
-        handleReorderOrMove(state.draggedPath, targetPath, targetIsFolder, targetName, targetParentPath, position);
-      });
-    });
-
-    const treeContainer = document.getElementById('workspace-tree-container');
-    if (treeContainer) {
-      treeContainer.addEventListener('dragenter', (e) => {
-        if (!state.draggedPath) return;
-        if (e.target.closest('.tree-node')) return;
-        if (isValidRootTarget(state.draggedPath)) {
-          e.preventDefault();
-          highlightRootTarget(treeContainer, true);
-        }
-      });
-
-      treeContainer.addEventListener('dragover', (e) => {
-        if (!state.draggedPath) return;
-        if (e.target.closest('.tree-node')) return;
-        if (isValidRootTarget(state.draggedPath)) {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          highlightRootTarget(treeContainer, true);
-        }
-      });
-
-      treeContainer.addEventListener('dragleave', (e) => {
-        const rect = treeContainer.getBoundingClientRect();
-        if (e.clientX < rect.left || e.clientX >= rect.right || e.clientY < rect.top || e.clientY >= rect.bottom) {
-          highlightRootTarget(treeContainer, false);
-        }
-      });
-
-      treeContainer.addEventListener('drop', (e) => {
-        if (!state.draggedPath) return;
-        if (e.target.closest('.tree-node')) return;
-        e.preventDefault();
-        e.stopPropagation();
-        highlightRootTarget(treeContainer, false);
-
-        const srcPath = state.draggedPath;
-        handleReorderOrMove(srcPath, '', false, '', '', 'inside');
-      });
-    }
-  }
-
   function attachEvents() {
     // Header Desktop & Mobile Buttons
     const handlePullClick = () => {
@@ -2460,12 +1825,6 @@
         showToast("No active local image build found. Please build a local image first.", true);
         return;
       }
-      const parsed = parseRepoAndTag(
-        (state.lastLocalBuild && state.lastLocalBuild.tag) || state.dockerTargetImageTagInput || state.dockerImageInput
-      );
-      state.dockerImageInput = parsed.repo;
-      state.dockerTagInput = parsed.tag;
-
       state.modals.pushDocker = true;
       if (state.dockerHubRepos.length === 0) {
         loadDockerHubRepos();
@@ -2610,9 +1969,6 @@
       });
     });
 
-    // Workspace Drag & Drop listeners
-    initWorkspaceDragAndDrop();
-
     // Editor Tabs
     document.querySelectorAll('[data-tab-path]').forEach(el => {
       el.addEventListener('click', (e) => {
@@ -2741,72 +2097,8 @@
       }
     });
 
-    // Terminal Scroll & Auto-Scroll Handler
-    const term = document.getElementById('terminal-logs-body');
-    const scrollAnchor = document.getElementById('terminal-scroll-anchor');
-    if (term) {
-      if (state.terminalAutoScroll !== false) {
-        if (scrollAnchor && typeof scrollAnchor.scrollIntoView === 'function') {
-          scrollAnchor.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        } else {
-          term.scrollTop = term.scrollHeight;
-        }
-        state.terminalScrollTop = term.scrollTop;
-      } else if (state.terminalScrollTop !== null && state.terminalScrollTop !== undefined) {
-        term.scrollTop = state.terminalScrollTop;
-      }
-
-      term.addEventListener('scroll', () => {
-        const isAtBottom = (term.scrollHeight - term.scrollTop - term.clientHeight) < 35;
-        state.terminalAutoScroll = isAtBottom;
-        state.terminalScrollTop = term.scrollTop;
-
-        const resumeBtn = document.getElementById('btn-terminal-resume-autoscroll');
-        if (resumeBtn) {
-          if (!isAtBottom) {
-            resumeBtn.classList.remove('hidden');
-          } else {
-            resumeBtn.classList.add('hidden');
-          }
-        }
-      });
-    }
-
-    document.getElementById('btn-copy-logs')?.addEventListener('click', async () => {
-      const logs = state.activeJobLogs || '';
-      if (!logs) {
-        showToast('Console is empty.', true);
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(logs);
-        const btn = document.getElementById('btn-copy-logs');
-        if (btn) {
-          btn.innerHTML = '<i class="fa-solid fa-check text-emerald-400"></i>';
-          setTimeout(() => {
-            if (btn) btn.innerHTML = '<i class="fa-solid fa-copy"></i>';
-          }, 2000);
-        }
-        showToast('Console logs copied to clipboard!');
-      } catch (err) {
-        showToast('Failed to copy logs to clipboard', true);
-      }
-    });
-
-    document.getElementById('btn-terminal-resume-autoscroll')?.addEventListener('click', () => {
-      state.terminalAutoScroll = true;
-      state.terminalScrollTop = null;
-      const termEl = document.getElementById('terminal-logs-body');
-      if (termEl) {
-        termEl.scrollTop = termEl.scrollHeight;
-      }
-      render();
-    });
-
     document.getElementById('btn-clear-logs')?.addEventListener('click', () => {
       state.activeJobLogs = '';
-      state.terminalAutoScroll = true;
-      state.terminalScrollTop = null;
       render();
     });
     document.getElementById('btn-toggle-terminal-max')?.addEventListener('click', () => {
@@ -2918,24 +2210,9 @@
           state.files = [];
           state.openTabs = [];
           state.activeTabPath = null;
-          state.currentRepoUrl = '';
-          state.pullRepoUrl = '';
-          state.pullBranch = 'main';
-          state.activeProject = null;
-          state.repoPath = null;
-          state.activeBranch = null;
-          state.activeRepo = {
-            name: 'No Project Loaded',
-            full_name: '',
-            branch: '',
-            url: ''
-          };
-          state.dockerTargetImageTagInput = '';
           state.modals.clearWorkspace = false;
-          safeLocalStorageRemove('dockforge_active_repo');
-          showToast('Workspace cleared successfully.');
+          showToast('Workspace files cleared successfully.');
           await loadWorkspaceTree();
-          await loadGitHubRepos();
         } else {
           const data = await res.json().catch(() => ({}));
           showToast(data.detail || 'Failed to clear workspace', true);
@@ -3025,42 +2302,21 @@
       }
     });
 
-    // Build Container Image Form Handler
+    // Build Local Docker Image Form Handler
     document.getElementById('form-build-image')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const targetInput = document.getElementById('build-target-image-tag');
-      const targetTag = targetInput ? targetInput.value.trim() : '';
-
-      if (!targetTag) {
-        showToast('Please enter a target image tag', true);
-        return;
-      }
-
-      state.dockerTargetImageTagInput = targetTag;
-
-      let imageName = 'dockforge';
-      let tag = 'latest';
-
-      if (targetTag.includes(':')) {
-        const parts = targetTag.split(':');
-        imageName = parts[0];
-        tag = parts[1] || 'latest';
-      } else {
-        imageName = targetTag;
-      }
-
+      const tagInput = document.getElementById('build-local-tag');
+      const tag = tagInput ? tagInput.value.trim() || 'latest' : 'latest';
       state.dockerLocalTagInput = tag;
 
       try {
-        const res = await apiFetch('/api/build', {
+        const res = await apiFetch('/api/jobs/build', {
           method: 'POST',
           body: JSON.stringify({
             action: 'build',
-            image_name: imageName,
+            image_name: 'dockforge',
             tag: tag,
-            target_image_tag: targetTag,
-            local_image: 'dockforge',
-            push_to_hub: false
+            local_image: 'dockforge'
           })
         });
         if (res.ok) {
@@ -3083,46 +2339,7 @@
         const input = document.getElementById('push-docker-repo');
         if (input) input.value = val;
         state.dockerImageInput = val;
-
-        const bannerEl = document.getElementById('push-source-image-banner');
-        if (bannerEl) {
-          bannerEl.textContent = `${val}:${state.dockerTagInput || 'latest'}`;
-        }
-        const summaryEl = document.getElementById('push-summary-text');
-        if (summaryEl) {
-          summaryEl.textContent = `${val}:${state.dockerTagInput || 'latest'}`;
-        }
         loadDockerHubTags(val);
-      }
-    });
-
-    document.getElementById('push-docker-repo')?.addEventListener('input', (e) => {
-      const val = e.target.value.trim();
-      state.dockerImageInput = val;
-      const select = document.getElementById('select-push-dockerhub-repo');
-      if (select) {
-        select.value = val;
-      }
-      const bannerEl = document.getElementById('push-source-image-banner');
-      if (bannerEl) {
-        bannerEl.textContent = `${val || '...'}:${state.dockerTagInput || 'latest'}`;
-      }
-      const summaryEl = document.getElementById('push-summary-text');
-      if (summaryEl) {
-        summaryEl.textContent = `${val || '...'}:${state.dockerTagInput || 'latest'}`;
-      }
-    });
-
-    document.getElementById('push-docker-tag')?.addEventListener('input', (e) => {
-      const val = e.target.value.trim();
-      state.dockerTagInput = val;
-      const bannerEl = document.getElementById('push-source-image-banner');
-      if (bannerEl) {
-        bannerEl.textContent = `${state.dockerImageInput || '...'}:${val || 'latest'}`;
-      }
-      const summaryEl = document.getElementById('push-summary-text');
-      if (summaryEl) {
-        summaryEl.textContent = `${state.dockerImageInput || '...'}:${val || 'latest'}`;
       }
     });
 
@@ -3132,15 +2349,6 @@
         const input = document.getElementById('push-docker-tag');
         if (input) input.value = val;
         state.dockerTagInput = val;
-
-        const bannerEl = document.getElementById('push-source-image-banner');
-        if (bannerEl) {
-          bannerEl.textContent = `${state.dockerImageInput || '...'}:${val}`;
-        }
-        const summaryEl = document.getElementById('push-summary-text');
-        if (summaryEl) {
-          summaryEl.textContent = `${state.dockerImageInput || '...'}:${val}`;
-        }
       }
     });
 
@@ -3164,7 +2372,7 @@
       state.dockerTagInput = tag;
 
       try {
-        const res = await apiFetch('/api/push', {
+        const res = await apiFetch('/api/jobs/build', {
           method: 'POST',
           body: JSON.stringify({
             action: 'push',
@@ -3194,8 +2402,6 @@
           if (res.ok) {
             const data = await res.json();
             state.activeJobLogs = data.logs;
-            state.terminalAutoScroll = true;
-            state.terminalScrollTop = null;
             state.modals.jobs = false;
             render();
           }
