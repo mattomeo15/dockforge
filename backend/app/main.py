@@ -147,12 +147,13 @@ async def get_github_repos(db: Session = Depends(get_db), current_user: UserDB =
 def get_settings(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     settings = db.query(SettingsDB).first()
     if not settings:
-        return {"github_token": "", "dockerhub_username": "", "dockerhub_token": "", "theme": "dark"}
+        return {"github_token": "", "dockerhub_username": "", "dockerhub_token": "", "theme": "dark", "auto_prune_project_builds": True}
     return {
         "github_token": settings.github_token or "",
         "dockerhub_username": settings.dockerhub_username or "",
         "dockerhub_token": settings.dockerhub_token or "",
-        "theme": settings.theme or "dark"
+        "theme": settings.theme or "dark",
+        "auto_prune_project_builds": settings.auto_prune_project_builds if settings.auto_prune_project_builds is not None else True
     }
 
 @app.post("/api/settings")
@@ -170,6 +171,8 @@ def update_settings(payload: SettingsSchema, db: Session = Depends(get_db), curr
         settings.dockerhub_token = payload.dockerhub_token
     if payload.theme is not None:
         settings.theme = payload.theme
+    if payload.auto_prune_project_builds is not None:
+        settings.auto_prune_project_builds = payload.auto_prune_project_builds
 
     # Handle optional account credentials update
     if payload.new_username and payload.new_username.strip():
@@ -512,6 +515,7 @@ async def websocket_build_logs(websocket: WebSocket, job_id: str, db: Session = 
     settings = db.query(SettingsDB).first()
     dh_user = settings.dockerhub_username if settings else None
     dh_token = settings.dockerhub_token if settings else None
+    auto_prune = settings.auto_prune_project_builds if (settings and settings.auto_prune_project_builds is not None) else True
 
     async def log_callback(line: str):
         try:
@@ -535,6 +539,7 @@ async def websocket_build_logs(websocket: WebSocket, job_id: str, db: Session = 
             tag=job.tag,
             dockerfile_path="Dockerfile",
             dockerhub_username=dh_user,
+            auto_prune=auto_prune,
             log_callback=log_callback
         )
 

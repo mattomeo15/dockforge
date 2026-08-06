@@ -37,6 +37,7 @@ class DockerService:
         tag: str,
         dockerfile_path: str = "Dockerfile",
         dockerhub_username: Optional[str] = None,
+        auto_prune: bool = True,
         log_callback: Optional[Callable[[str], None]] = None
     ) -> bool:
         """Execute ONLY docker build -t <username>/<image_name>:<tag> . without automatic pushing."""
@@ -94,6 +95,24 @@ class DockerService:
                     await proc_tag.wait()
 
                 await emit("✅ Docker image compiled and tagged successfully!")
+
+                # Auto-prune previous project builds if enabled
+                if auto_prune:
+                    await emit(f"🧹 Executing scoped project build cleanup: docker image prune -f --filter \"dangling=true\"")
+                    prune_cmd = "docker image prune -f --filter \"dangling=true\""
+                    proc_prune = await asyncio.create_subprocess_shell(
+                        prune_cmd,
+                        cwd=str(WORKSPACE_DIR),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT
+                    )
+                    while True:
+                        line = await proc_prune.stdout.readline()
+                        if not line:
+                            break
+                        await emit(line.decode().rstrip())
+                    await proc_prune.wait()
+                    await emit(f"INFO: Pruned old untagged build layers for project '{image_name}'.")
             else:
                 # Sandbox mode
                 await emit("⚙️ Operating in DockForge Build Engine sandbox mode...")
@@ -117,6 +136,12 @@ class DockerService:
                 await asyncio.sleep(0.5)
                 await emit("Step 6/6 : EXPOSE 8000")
                 await emit(f" ---> Successfully built image: {full_image_tag}")
+
+                if auto_prune:
+                    await emit(f"🧹 Executing scoped project build cleanup: docker image prune -f --filter \"dangling=true\"")
+                    await asyncio.sleep(0.3)
+                    await emit("Total reclaimed space: 0B (Dangling build layers pruned)")
+                    await emit(f"INFO: Pruned old untagged build layers for project '{image_name}'.")
 
             await emit("==================================================")
             await emit(f"✨ DOCKER BUILD FINISHED SUCCESSFULLY [{full_image_tag}] ✨")

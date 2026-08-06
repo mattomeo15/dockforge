@@ -39,6 +39,12 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+
+        try:
+            conn.execute(text("ALTER TABLE settings ADD COLUMN auto_prune_project_builds BOOLEAN DEFAULT 1"))
+            conn.commit()
+        except Exception:
+            pass
             
         try:
             conn.execute(text("ALTER TABLE build_jobs ADD COLUMN commit_sha VARCHAR(40)"))

@@ -24,6 +24,7 @@ class SettingsDB(Base):
     dockerhub_username = Column(String(100), nullable=True)
     dockerhub_token = Column(String(255), nullable=True)
     theme = Column(String(20), default="dark", nullable=True)
+    auto_prune_project_builds = Column(Boolean, default=True, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class RepositoryDB(Base):
@@ -67,6 +68,7 @@ class SettingsSchema(BaseModel):
     dockerhub_username: Optional[str] = None
     dockerhub_token: Optional[str] = None
     theme: Optional[str] = "dark"
+    auto_prune_project_builds: Optional[bool] = True
     new_username: Optional[str] = None
     new_password: Optional[str] = None
 
