@@ -1736,15 +1736,58 @@
   function getJobTypeBadge(actionType) {
     const type = (actionType || 'build').toLowerCase();
     if (type === 'build' || type === 'docker_build') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20"><i class="fa-solid fa-layer-group text-[9px] mr-1"></i>BUILD</span>`;
+      return `<span class="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 inline-flex items-center"><i class="fa-solid fa-layer-group text-[9px] mr-1.5"></i>BUILD</span>`;
     } else if (type === 'push' || type === 'docker_push') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20"><i class="fa-solid fa-rocket text-[9px] mr-1"></i>PUSH</span>`;
+      return `<span class="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20 inline-flex items-center"><i class="fa-solid fa-rocket text-[9px] mr-1.5"></i>PUSH</span>`;
     } else if (type === 'git_pull' || type === 'pull') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i class="fa-solid fa-code-branch text-[9px] mr-1"></i>GIT PULL</span>`;
+      return `<span class="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 inline-flex items-center"><i class="fa-solid fa-code-branch text-[9px] mr-1.5"></i>GIT PULL</span>`;
     } else if (type === 'git_push') {
-      return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/20"><i class="fa-solid fa-code-commit text-[9px] mr-1"></i>GIT PUSH</span>`;
+      return `<span class="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 inline-flex items-center"><i class="fa-solid fa-code-commit text-[9px] mr-1.5"></i>GIT PUSH</span>`;
     }
-    return `<span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-md bg-slate-500/10 text-slate-400 border border-slate-500/20">${escapeHtml(type.toUpperCase())}</span>`;
+    return `<span class="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md bg-slate-500/10 text-slate-400 border border-slate-500/20 inline-flex items-center">${escapeHtml(type.toUpperCase())}</span>`;
+  }
+
+  function formatCompletedTime(completedAt, status) {
+    if (!completedAt) {
+      if (status === 'building' || status === 'pushing' || status === 'queued') {
+        return '<span class="italic text-amber-500 font-medium">In Progress</span>';
+      }
+      return '-';
+    }
+
+    const date = new Date(completedAt);
+    if (isNaN(date.getTime())) return '-';
+
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSecs = Math.floor(diffMs / 1000);
+
+    let relativeStr = '';
+    if (diffSecs < 10) {
+      relativeStr = 'just now';
+    } else if (diffSecs < 60) {
+      relativeStr = `${diffSecs}s ago`;
+    } else if (diffSecs < 3600) {
+      const mins = Math.floor(diffSecs / 60);
+      relativeStr = `${mins}m ago`;
+    } else if (diffSecs < 86400) {
+      const hours = Math.floor(diffSecs / 3600);
+      relativeStr = `${hours}h ago`;
+    } else {
+      const days = Math.floor(diffSecs / 86400);
+      relativeStr = `${days}d ago`;
+    }
+
+    const dateTimeStr = date.toLocaleString('en-US', {
+      month: 'numeric',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
+
+    return `${dateTimeStr} (${relativeStr})`;
   }
 
   function renderBuildModal() {
@@ -1911,7 +1954,7 @@
   function renderJobsModal() {
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
-        <div class="w-full max-w-3xl dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+        <div class="w-full max-w-4xl dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
               <i class="fa-solid fa-list-check text-purple-500"></i>
@@ -1924,29 +1967,36 @@
               <thead>
                 <tr class="border-b dark:border-slate-800 border-slate-200 dark:text-slate-400 text-slate-500 uppercase tracking-wider">
                   <th class="py-2.5 px-3">Job ID</th>
-                  <th class="py-2.5 px-3">Type</th>
+                  <th class="py-2.5 px-3 w-28">Type</th>
                   <th class="py-2.5 px-3">Image / Target</th>
+                  <th class="py-2.5 px-3 font-mono">Image ID</th>
                   <th class="py-2.5 px-3">Status</th>
-                  <th class="py-2.5 px-3">Started</th>
+                  <th class="py-2.5 px-3">Completed</th>
                   <th class="py-2.5 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody class="divide-y dark:divide-slate-800/50 divide-slate-200">
-                ${state.jobs.length === 0 ? `<tr><td colspan="6" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
-                ${state.jobs.map(j => `
-                  <tr class="dark:hover:bg-slate-800/50 hover:bg-slate-100">
-                    <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600">${j.id}</td>
-                    <td class="py-2.5 px-3">${getJobTypeBadge(j.job_type || j.action)}</td>
-                    <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900">${j.image_name}:${j.tag}</td>
-                    <td class="py-2.5 px-3">${getStatusPill(j.status)}</td>
-                    <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500">${new Date(j.started_at).toLocaleTimeString()}</td>
-                    <td class="py-2.5 px-3 text-right">
-                      <button class="btn-view-job-logs px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded" data-job-id="${j.id}">
-                        View Log
-                      </button>
-                    </td>
-                  </tr>
-                `).join('')}
+                ${state.jobs.length === 0 ? `<tr><td colspan="7" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
+                ${state.jobs.map(j => {
+                  const rawImgId = j.image_id || j.commit_sha || '';
+                  const displayImgId = rawImgId ? rawImgId.substring(0, 12) : '-';
+                  const completedTime = j.completed_at || j.ended_at || j.finished_at;
+                  return `
+                    <tr class="dark:hover:bg-slate-800/50 hover:bg-slate-100">
+                      <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600" title="${escapeHtml(j.id)}">${escapeHtml((j.id || '').substring(0, 8))}</td>
+                      <td class="py-2.5 px-3 w-28">${getJobTypeBadge(j.job_type || j.action)}</td>
+                      <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900">${escapeHtml(j.image_name)}:${escapeHtml(j.tag)}</td>
+                      <td class="py-2.5 px-3 font-mono dark:text-slate-400 text-slate-500" title="${escapeHtml(rawImgId || '-')}">${escapeHtml(displayImgId)}</td>
+                      <td class="py-2.5 px-3">${getStatusPill(j.status)}</td>
+                      <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500 whitespace-nowrap">${formatCompletedTime(completedTime, j.status)}</td>
+                      <td class="py-2.5 px-3 text-right">
+                        <button class="btn-view-job-logs px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded" data-job-id="${j.id}">
+                          View Log
+                        </button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
               </tbody>
             </table>
           </div>
@@ -2020,7 +2070,7 @@
                 </div>
                 <label class="relative inline-flex items-center cursor-pointer shrink-0">
                   <input type="checkbox" id="setting-auto-prune" ${state.settings?.auto_prune_project_builds !== false ? 'checked' : ''} class="sr-only peer">
-                  <div class="relative w-11 h-6 shrink-0 bg-slate-300 peer-focus:outline-none dark:bg-slate-700 rounded-full peer peer-checked:after:translate-x-[22px] peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all after:duration-200 after:ease-in-out peer-checked:bg-amber-600"></div>
+                  <div class="relative w-11 h-6 shrink-0 bg-slate-300 peer-focus:outline-none dark:bg-slate-700 rounded-full peer peer-checked:after:translate-x-[20px] peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all after:duration-200 after:ease-in-out peer-checked:bg-amber-600"></div>
                 </label>
               </div>
             </div>
