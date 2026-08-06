@@ -418,6 +418,9 @@
       branch: branch,
       url: url
     };
+
+    const newRepo = getCurrentRepoName();
+    resetProjectContextState(newRepo);
   }
 
   async function loadGitHubRepos(showToastOnError = false) {
@@ -620,8 +623,10 @@
       } else if (state.activeJobLogs.includes('DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('LOCAL DOCKER BUILD FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('BUILD & PUSH JOB FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully built')) {
         const buildTag = state.dockerTargetImageTagInput || state.dockerLocalTagInput || 'latest';
         const parsed = parseRepoAndTag(buildTag);
+        const activeRepoName = getCurrentRepoName();
         state.lastLocalBuild = {
           ready: true,
+          projectName: activeRepoName,
           imageName: parsed.repo,
           tag: buildTag,
           parsedRepo: parsed.repo,
@@ -886,8 +891,8 @@
                 <span>Image Build</span>
               </button>
 
-              <button id="btn-push-docker" ${state.lastLocalBuild && state.lastLocalBuild.ready ? '' : 'disabled'} class="h-8 px-2.5 text-xs font-semibold ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'bg-blue-700 hover:bg-blue-600 text-white shadow-2xs border border-blue-600/30 cursor-pointer' : 'bg-slate-100 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-800 opacity-60 cursor-not-allowed'} rounded-md flex items-center space-x-1.5 transition" title="${state.lastLocalBuild && state.lastLocalBuild.ready ? 'Push Docker Image to Registry' : 'Build an image first before pushing'}">
-                <i class="fa-solid fa-rocket ${state.lastLocalBuild && state.lastLocalBuild.ready ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'} text-[15px] mr-0"></i>
+              <button id="btn-push-docker" ${isBuildReadyForCurrentProject() ? '' : 'disabled'} class="h-8 px-2.5 text-xs font-semibold ${isBuildReadyForCurrentProject() ? 'bg-blue-700 hover:bg-blue-600 text-white shadow-2xs border border-blue-600/30 cursor-pointer' : 'bg-slate-100 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-800 opacity-50 cursor-not-allowed pointer-events-none'} rounded-md flex items-center space-x-1.5 transition" title="${isBuildReadyForCurrentProject() ? 'Push Docker Image to Registry' : 'Please build the image for this project before pushing to Docker Hub'}">
+                <i class="fa-solid fa-rocket ${isBuildReadyForCurrentProject() ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'} text-[15px] mr-0"></i>
                 <span>Image Push</span>
               </button>
 
@@ -1631,19 +1636,55 @@
   }
 
   function getCurrentRepoName() {
-    if (state.activeRepo?.name && state.activeRepo.name !== 'No Project Loaded') {
-      return state.activeRepo.name.toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-    }
-    if (state.activeRepo?.full_name && state.activeRepo.full_name.includes('/')) {
-      return state.activeRepo.full_name.split('/')[1].toLowerCase().replace(/[^a-z0-9_.-]/g, '');
-    }
-    if (state.currentRepoUrl) {
+    let name = '';
+    if (state.activeProject && state.activeProject !== 'No Project Loaded') {
+      name = state.activeProject;
+    } else if (state.activeRepo && state.activeRepo.name && state.activeRepo.name !== 'No Project Loaded') {
+      name = state.activeRepo.name;
+    } else if (state.repoPath && state.repoPath !== 'No Project Loaded') {
+      name = state.repoPath.includes('/') ? state.repoPath.split('/')[1] : state.repoPath;
+    } else if (state.currentRepoUrl) {
       const clean = state.currentRepoUrl.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
-      if (clean.includes('/')) {
-        return clean.split('/').pop().toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+      name = clean.includes('/') ? clean.split('/').pop() : clean;
+    }
+    if (!name) name = 'dockforge';
+    return name.toLowerCase().replace(/[^a-z0-9_.-]/g, '');
+  }
+
+  function isBuildReadyForCurrentProject() {
+    const currentProject = getCurrentRepoName();
+    if (!state.lastLocalBuild || !state.lastLocalBuild.ready) return false;
+    if (state.lastLocalBuild.projectName) {
+      return state.lastLocalBuild.projectName.toLowerCase() === currentProject.toLowerCase();
+    }
+    if (state.lastLocalBuild.tag && state.lastLocalBuild.tag.toLowerCase().includes(currentProject.toLowerCase())) {
+      return true;
+    }
+    return false;
+  }
+
+  function resetProjectContextState(newRepoName = null) {
+    const currentRepo = (newRepoName || getCurrentRepoName()).toLowerCase();
+    
+    if (state.lastLocalBuild) {
+      if (state.lastLocalBuild.projectName && state.lastLocalBuild.projectName.toLowerCase() !== currentRepo) {
+        state.lastLocalBuild = null;
+        safeLocalStorageRemove('dockforge_last_build');
+      } else if (state.lastLocalBuild.tag && !state.lastLocalBuild.tag.toLowerCase().includes(currentRepo)) {
+        state.lastLocalBuild = null;
+        safeLocalStorageRemove('dockforge_last_build');
       }
     }
-    return 'dockforge';
+
+    const dhUser = (state.settings && (state.settings.dockerhub_username || state.settings.docker_username || state.settings.username)) ||
+                   (state.currentCredentials && (state.currentCredentials.dockerhub_username || state.currentCredentials.docker_username)) ||
+                   safeLocalStorageGet('dockforge_dh_username') || '';
+
+    const defaultTag = dhUser ? `${dhUser}/${currentRepo}:latest` : `${currentRepo}:latest`;
+    state.dockerTargetImageTagInput = defaultTag;
+    state.dockerImageInput = dhUser ? `${dhUser}/${currentRepo}` : currentRepo;
+    state.dockerTagInput = 'latest';
+    state.dockerLocalTagInput = defaultTag;
   }
 
   function parseRepoAndTag(rawInput) {
@@ -1710,7 +1751,12 @@
     const dhUser = state.settings?.dockerhub_username || state.settings?.docker_username || state.settings?.username || '';
     const currentRepoName = getCurrentRepoName();
     const defaultTag = dhUser ? `${dhUser}/${currentRepoName}:latest` : `${currentRepoName}:latest`;
-    const currentTargetTag = state.dockerTargetImageTagInput || defaultTag;
+    
+    let currentTargetTag = state.dockerTargetImageTagInput;
+    if (!currentTargetTag || !currentTargetTag.includes(currentRepoName)) {
+      currentTargetTag = defaultTag;
+      state.dockerTargetImageTagInput = defaultTag;
+    }
 
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
@@ -1961,6 +2007,21 @@
                   <i class="fa-solid fa-vial text-amber-500"></i>
                   <span>Test Docker Hub</span>
                 </button>
+              </div>
+            </div>
+
+            <!-- Docker Build Cleanup -->
+            <div class="pt-4 border-t dark:border-slate-800 border-slate-200">
+              <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Docker Build Cleanup</label>
+              <div class="flex items-center justify-between p-3 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg overflow-hidden">
+                <div class="space-y-0.5 pr-2">
+                  <div class="text-xs font-medium dark:text-slate-200 text-slate-800">Auto-prune previous project builds</div>
+                  <div class="text-[11px] text-slate-400">Prunes untagged dangling build layers filtered strictly by project label upon successful build</div>
+                </div>
+                <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                  <input type="checkbox" id="setting-auto-prune" ${state.settings?.auto_prune_project_builds !== false ? 'checked' : ''} class="sr-only peer">
+                  <div class="relative w-11 h-6 bg-slate-300 peer-focus:outline-none dark:bg-slate-700 rounded-full peer peer-checked:after:translate-x-5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-600"></div>
+                </label>
               </div>
             </div>
 
@@ -2456,8 +2517,8 @@
     document.getElementById('btn-build-image')?.addEventListener('click', () => { state.modals.build = true; render(); });
     
     const handlePushDockerClick = () => {
-      if (!state.lastLocalBuild || !state.lastLocalBuild.ready) {
-        showToast("No active local image build found. Please build a local image first.", true);
+      if (!isBuildReadyForCurrentProject()) {
+        showToast("Please build the image for this project before pushing to Docker Hub", true);
         return;
       }
       const parsed = parseRepoAndTag(
@@ -3261,6 +3322,7 @@
       const github_token = document.getElementById('setting-gh-token').value;
       const dockerhub_username = document.getElementById('setting-dh-user').value;
       const dockerhub_token = document.getElementById('setting-dh-token').value;
+      const auto_prune_project_builds = document.getElementById('setting-auto-prune')?.checked ?? true;
       const new_username = document.getElementById('setting-acc-user')?.value.trim();
       const new_password = document.getElementById('setting-acc-pass')?.value.trim();
       const theme = state.theme;
@@ -3287,6 +3349,7 @@
             github_token,
             dockerhub_username,
             dockerhub_token,
+            auto_prune_project_builds,
             theme,
             new_username,
             new_password
@@ -3295,7 +3358,7 @@
 
         if (res.ok) {
           const data = await res.json();
-          state.settings = { github_token, dockerhub_username, dockerhub_token, theme };
+          state.settings = { github_token, dockerhub_username, dockerhub_token, auto_prune_project_builds, theme };
           if (data.username) {
             state.user = data.username;
             safeLocalStorageSet('dockforge_user', data.username);

@@ -301,21 +301,27 @@ async function startServer() {
       github_token: "",
       dockerhub_username: "",
       dockerhub_token: "",
+      auto_prune_project_builds: true,
     });
+    if (currentSettings.auto_prune_project_builds === undefined) {
+      currentSettings.auto_prune_project_builds = true;
+    }
     res.json(currentSettings);
   });
 
   app.post("/api/settings", authenticateToken, (req: any, res) => {
-    const { github_token, dockerhub_username, dockerhub_token, new_username, new_password } = req.body;
+    const { github_token, dockerhub_username, dockerhub_token, auto_prune_project_builds, new_username, new_password } = req.body;
     const currentSettings = readJsonFile(SETTINGS_FILE, {
       github_token: "",
       dockerhub_username: "",
       dockerhub_token: "",
+      auto_prune_project_builds: true,
     });
 
     if (github_token !== undefined) currentSettings.github_token = github_token;
     if (dockerhub_username !== undefined) currentSettings.dockerhub_username = dockerhub_username;
     if (dockerhub_token !== undefined) currentSettings.dockerhub_token = dockerhub_token;
+    if (auto_prune_project_builds !== undefined) currentSettings.auto_prune_project_builds = auto_prune_project_builds;
 
     writeJsonFile(SETTINGS_FILE, currentSettings);
 
@@ -1286,12 +1292,20 @@ async function startServer() {
       await emit(`📁 Context Directory: ${WORKSPACE_DIR}`);
       await emit("==================================================");
 
-      const currentSettings = readJsonFile(SETTINGS_FILE, {
+      const currentSettings = readJsonFile<{
+        dockerhub_username?: string;
+        dockerhub_token?: string;
+        docker_username?: string;
+        docker_token?: string;
+        docker_password?: string;
+        auto_prune_project_builds?: boolean;
+      }>(SETTINGS_FILE, {
         dockerhub_username: "",
         dockerhub_token: "",
         docker_username: "",
         docker_token: "",
         docker_password: "",
+        auto_prune_project_builds: true,
       });
 
       const dockerUser = (currentSettings.dockerhub_username || currentSettings.docker_username || "").trim();
@@ -1373,17 +1387,25 @@ async function startServer() {
         await emit("==================================================");
       } else {
         // Default action === 'build'
+        const rawRepoName = job.image_name || "dockforge";
+        const targetRepoName = rawRepoName.includes("/")
+          ? rawRepoName.split("/")[1].split(":")[0].toLowerCase()
+          : rawRepoName.split(":")[0].toLowerCase();
+
+        const projectLabel = `com.dockforge.project=${targetRepoName}`;
+
         await emit("==================================================");
         await emit(`🚀 Starting DockForge Image Build Job: ${jobId}`);
         await emit(`📦 Target Image Tag: ${fullImageTag}`);
+        await emit(`🏷️ Project Label: ${projectLabel}`);
         await emit(`📁 Context Directory: ${WORKSPACE_DIR}`);
         await emit("==================================================");
 
         if (dockerSockExists) {
           await emit("🐳 Host Docker Socket detected at /var/run/docker.sock");
-          await emit(`🛠️ Executing: docker build -t ${fullImageTag} .`);
+          await emit(`🛠️ Executing: docker build --label "${projectLabel}" -t ${fullImageTag} .`);
 
-          const buildProc = spawn("docker", ["build", "-t", fullImageTag, "."], {
+          const buildProc = spawn("docker", ["build", "--label", projectLabel, "-t", fullImageTag, "."], {
             cwd: WORKSPACE_DIR,
           });
           activeChildProcesses.add(buildProc);
@@ -1400,30 +1422,46 @@ async function startServer() {
             activeChildProcesses.add(tagProc);
             await new Promise((resolve) => tagProc.on("close", resolve));
           }
+
+          // Auto-prune previous project builds if enabled
+          const autoPrune = currentSettings.auto_prune_project_builds !== false;
+          if (autoPrune) {
+            await emit(`🧹 Executing scoped project build cleanup: docker image prune -f --filter "label=${projectLabel}" --filter "dangling=true"`);
+            const pruneProc = spawn("docker", ["image", "prune", "-f", "--filter", `label=${projectLabel}`, "--filter", "dangling=true"], {
+              cwd: WORKSPACE_DIR,
+            });
+            activeChildProcesses.add(pruneProc);
+            pruneProc.stdout.on("data", (data) => emit(data.toString().trim()));
+            pruneProc.stderr.on("data", (data) => emit(data.toString().trim()));
+            await new Promise((resolve) => pruneProc.on("close", resolve));
+            await emit(`INFO: Pruned old untagged build layers for project '${targetRepoName}'.`);
+          }
         } else {
           await emit("⚙️ Operating in DockForge Build Engine Sandbox mode...");
+          await emit(`Step 1/6 : LABEL ${projectLabel}`);
           await new Promise((r) => setTimeout(r, 600));
-          await emit("Step 1/6 : FROM python:3.11-slim");
+          await emit("Step 2/6 : FROM python:3.11-slim");
           await new Promise((r) => setTimeout(r, 700));
           await emit(" ---> Downloading base layers: [====================>] 100%");
           await emit(" ---> Pull complete python:3.11-slim");
           await new Promise((r) => setTimeout(r, 800));
-          await emit("Step 2/6 : WORKDIR /app");
+          await emit("Step 3/6 : WORKDIR /app");
           await emit(" ---> Running in container b712a4e");
           await new Promise((r) => setTimeout(r, 600));
-          await emit("Step 3/6 : COPY requirements.txt .");
+          await emit("Step 4/6 : COPY requirements.txt .");
           await emit(" ---> 5c9103e8211a");
           await new Promise((r) => setTimeout(r, 900));
-          await emit("Step 4/6 : RUN pip install --no-cache-dir -r requirements.txt");
-          await emit(" ---> Collecting fastapi, uvicorn...");
-          await emit(" ---> Successfully installed packages");
-          await new Promise((r) => setTimeout(r, 700));
           await emit("Step 5/6 : COPY . .");
           await emit(" ---> 3a102b489c0d");
           await new Promise((r) => setTimeout(r, 600));
           await emit("Step 6/6 : EXPOSE 8000");
           await emit(` ---> Successfully built image: ${fullImageTag}`);
           await new Promise((r) => setTimeout(r, 500));
+
+          const autoPrune = currentSettings.auto_prune_project_builds !== false;
+          if (autoPrune) {
+            await emit(`INFO: Pruned old untagged build layers for project '${targetRepoName}'.`);
+          }
         }
 
         await emit("==================================================");
