@@ -2013,14 +2013,14 @@
             <!-- Docker Build Cleanup -->
             <div class="pt-4 border-t dark:border-slate-800 border-slate-200">
               <label class="block text-xs font-semibold dark:text-slate-300 text-slate-700 uppercase tracking-wider mb-2">Docker Build Cleanup</label>
-              <div class="flex items-center justify-between p-3 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg overflow-hidden">
+              <div class="flex items-center justify-between p-3 dark:bg-slate-800 bg-slate-50 border dark:border-slate-700 border-slate-300 rounded-lg">
                 <div class="space-y-0.5 pr-2">
                   <div class="text-xs font-medium dark:text-slate-200 text-slate-800">Auto-prune previous project builds</div>
                   <div class="text-[11px] text-slate-400">Prunes untagged dangling build layers filtered strictly by project label upon successful build</div>
                 </div>
                 <label class="relative inline-flex items-center cursor-pointer shrink-0">
                   <input type="checkbox" id="setting-auto-prune" ${state.settings?.auto_prune_project_builds !== false ? 'checked' : ''} class="sr-only peer">
-                  <div class="relative w-11 h-6 bg-slate-300 peer-focus:outline-none dark:bg-slate-700 rounded-full peer peer-checked:after:translate-x-5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-600"></div>
+                  <div class="w-11 h-6 bg-slate-300 peer-focus:outline-none dark:bg-slate-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-600"></div>
                 </label>
               </div>
             </div>
