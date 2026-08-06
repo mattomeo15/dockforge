@@ -271,9 +271,20 @@ def delete_file_route(path: str, current_user: UserDB = Depends(get_current_user
 def get_workspace_order(current_user: UserDB = Depends(get_current_user)):
     return GitService.load_tree_order()
 
+@app.delete("/api/workspace/order")
+def delete_workspace_order(current_user: UserDB = Depends(get_current_user)):
+    try:
+        GitService.save_tree_order({})
+        return {"status": "success", "order_map": {}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/workspace/order")
 def save_workspace_order(payload: Dict[str, Any], current_user: UserDB = Depends(get_current_user)):
     try:
+        if payload.get("reset") or payload.get("clear"):
+            GitService.save_tree_order({})
+            return {"status": "success", "order_map": {}}
         existing = GitService.load_tree_order()
         if "order_map" in payload and isinstance(payload["order_map"], dict):
             existing.update(payload["order_map"])

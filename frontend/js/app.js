@@ -1042,7 +1042,24 @@
     `;
   }
 
+  function getAllFolderPaths(nodes) {
+    let paths = [];
+    if (!nodes || nodes.length === 0) return paths;
+    for (const node of nodes) {
+      if (node.type === 'folder') {
+        paths.push(node.path);
+        if (node.children && node.children.length > 0) {
+          paths = paths.concat(getAllFolderPaths(node.children));
+        }
+      }
+    }
+    return paths;
+  }
+
   function renderSidebar() {
+    const allFolderPaths = getAllFolderPaths(state.files);
+    const allFoldersExpanded = allFolderPaths.length > 0 && allFolderPaths.every(p => state.expandedFolders.has(p));
+
     return `
       <aside class="w-full h-full dark:bg-slate-900 bg-slate-50 dark:border-slate-800 border-slate-200 flex flex-col shrink-0 select-none md:border-r">
         <!-- FULL REPOSITORY SUB-HEADER IN SIDEBAR -->
@@ -1064,21 +1081,27 @@
         <div class="p-3 border-b dark:border-slate-800 border-slate-200 flex items-center justify-between text-slate-400">
           <span class="text-xs font-semibold uppercase tracking-wider dark:text-slate-400 text-slate-600">Workspace Files</span>
           <div class="flex items-center space-x-1">
-            <button id="btn-new-file" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition" title="New File">
+            <button id="btn-new-file" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="New File">
               <i class="fa-solid fa-file-circle-plus text-xs"></i>
             </button>
-            <button id="btn-new-folder" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition" title="New Folder">
+            <button id="btn-new-folder" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="New Folder">
               <i class="fa-solid fa-folder-plus text-xs"></i>
             </button>
-            <button id="btn-refresh-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition" title="Refresh Tree">
+            <button id="btn-sort-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="Sort Alphabetically (Directories First)">
+              <i class="fa-solid fa-arrow-down-a-z text-xs"></i>
+            </button>
+            <button id="btn-toggle-folders" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="${allFoldersExpanded ? 'Collapse All Folders' : 'Explode All Folders'}">
+              <i class="fa-solid ${allFoldersExpanded ? 'fa-folder-closed text-amber-400' : 'fa-folder-tree'} text-xs"></i>
+            </button>
+            <button id="btn-refresh-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="Refresh Tree">
               <i class="fa-solid fa-arrows-rotate text-xs"></i>
             </button>
-            <button id="btn-clear-tree" class="p-1 dark:hover:text-red-400 hover:text-red-600 text-slate-400 rounded transition" title="Clear Workspace">
+            <button id="btn-clear-tree" class="p-1 dark:hover:text-red-400 hover:text-red-600 text-slate-400 rounded transition cursor-pointer" title="Clear Workspace">
               <i class="fa-solid fa-eraser text-xs"></i>
             </button>
           </div>
         </div>
-        <div id="workspace-tree-container" class="flex-1 overflow-y-auto p-2 text-xs space-y-0.5 webkit-overflow-scrolling-touch rounded-lg transition-all duration-150 relative min-h-[150px]" title="Drag items here or drop onto folders to move them">
+        <div id="workspace-tree-container" class="flex-1 overflow-y-auto p-2 text-xs space-y-0.5 webkit-overflow-scrolling-touch rounded-lg transition-all duration-150 relative min-h-[150px] cursor-default" title="Drag items here or drop onto folders to move them">
           ${renderTreeNodes(state.files)}
         </div>
       </aside>
@@ -1102,8 +1125,13 @@
         if (idxA !== -1 && idxB !== -1) return idxA - idxB;
         if (idxA !== -1) return -1;
         if (idxB !== -1) return 1;
-        if (a.type === b.type) return a.name.localeCompare(b.name);
-        return a.type === 'folder' ? -1 : 1;
+        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      });
+    } else {
+      sortedNodes.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
       });
     }
 
@@ -1115,7 +1143,7 @@
       if (isFolder) {
         return `
           <div>
-            <div class="tree-node tree-folder flex items-center justify-between px-2.5 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 dark:text-slate-300 text-slate-700 dark:hover:text-white hover:text-slate-900 cursor-grab active:cursor-grabbing group transition-all duration-150 select-none"
+            <div class="tree-node tree-folder flex items-center justify-between px-2.5 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 dark:text-slate-300 text-slate-700 dark:hover:text-white hover:text-slate-900 cursor-pointer group transition-all duration-150 select-none"
                  style="padding-left: ${paddingLeft}"
                  draggable="true"
                  data-drag-path="${escapeHtml(node.path)}"
@@ -1123,7 +1151,7 @@
                  data-node-name="${escapeHtml(node.name)}"
                  data-parent-path="${escapeHtml(parentPath)}"
                  data-folder-path="${escapeHtml(node.path)}"
-                 title="Drag folder to reorder or move into directory">
+                 title="${escapeHtml(node.name)} (Folder)">
               <div class="flex items-center space-x-1.5 truncate pr-2 min-w-0 pointer-events-none">
                 <i class="fa-solid ${isExpanded ? 'fa-folder-open text-amber-400' : 'fa-folder text-amber-500'} shrink-0"></i>
                 <span class="truncate font-medium">${escapeHtml(node.name)}</span>
@@ -1149,7 +1177,7 @@
       else if (ext === 'md') icon = 'fa-file-lines text-slate-400';
 
       return `
-        <div class="tree-node tree-file flex items-center justify-between px-2.5 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 cursor-grab active:cursor-grabbing group transition-all duration-150 select-none ${isActive ? 'bg-blue-600/20 text-blue-600 dark:text-blue-400 font-semibold' : 'dark:text-slate-400 text-slate-600 dark:hover:text-slate-200 hover:text-slate-900'}"
+        <div class="tree-node tree-file flex items-center justify-between px-2.5 py-1.5 rounded dark:hover:bg-slate-800 hover:bg-slate-200 cursor-pointer group transition-all duration-150 select-none ${isActive ? 'bg-blue-600/20 text-blue-600 dark:text-blue-400 font-semibold' : 'dark:text-slate-400 text-slate-600 dark:hover:text-slate-200 hover:text-slate-900'}"
              style="padding-left: ${paddingLeft}"
              draggable="true"
              data-drag-path="${escapeHtml(node.path)}"
@@ -1157,7 +1185,7 @@
              data-node-name="${escapeHtml(node.name)}"
              data-parent-path="${escapeHtml(parentPath)}"
              data-file-path="${escapeHtml(node.path)}"
-             title="Drag file to reorder or move into directory">
+             title="${escapeHtml(node.name)}">
           <div class="flex items-center space-x-2 truncate pr-2 min-w-0 pointer-events-none">
             <i class="fa-solid ${icon} shrink-0"></i>
             <span class="truncate">${escapeHtml(node.name)}</span>
@@ -2678,6 +2706,37 @@
     });
     document.getElementById('btn-new-folder')?.addEventListener('click', () => {
       state.modals.newFolder = true;
+      render();
+    });
+    document.getElementById('btn-sort-tree')?.addEventListener('click', async () => {
+      state.treeOrder = {};
+      try {
+        await apiFetch('/api/workspace/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reset: true })
+        });
+      } catch (err) {
+        console.warn('Failed to clear order on server:', err);
+      }
+      showToast('Workspace sorted alphabetically (directories first)');
+      await loadWorkspaceTree(false);
+      render();
+    });
+    document.getElementById('btn-toggle-folders')?.addEventListener('click', () => {
+      const allPaths = getAllFolderPaths(state.files);
+      if (allPaths.length === 0) {
+        showToast('No folders in workspace');
+        return;
+      }
+      const isAllExpanded = allPaths.every(p => state.expandedFolders.has(p));
+      if (isAllExpanded) {
+        allPaths.forEach(p => state.expandedFolders.delete(p));
+        showToast('Collapsed all folders');
+      } else {
+        allPaths.forEach(p => state.expandedFolders.add(p));
+        showToast('Exploded all folders');
+      }
       render();
     });
     document.getElementById('btn-refresh-tree')?.addEventListener('click', () => loadWorkspaceTree(true));
