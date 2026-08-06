@@ -129,8 +129,19 @@
     dockerHubRepos: [],
     dockerHubTags: [],
     loadingDockerHubRepos: false,
-    loadingDockerHubTags: false
+    loadingDockerHubTags: false,
+    addMenuOpen: false
   };
+
+  function resetWorkspaceState() {
+    state.files = [];
+    state.treeOrder = {};
+    state.openTabs = [];
+    state.activeTabPath = null;
+    state.activeFileContent = '';
+    state.expandedFolders = new Set(['']);
+    state.addMenuOpen = false;
+  }
 
   // --- THEME MANAGEMENT & DOM UPDATES ---
   function applyTheme(themeName) {
@@ -227,6 +238,24 @@
     }
   }
 
+  function sortNodesAlphabetically(nodes) {
+    if (!nodes || !Array.isArray(nodes)) return [];
+    nodes.sort((a, b) => {
+      const isFolderA = a.type === 'folder' || a.type === 'directory';
+      const isFolderB = b.type === 'folder' || b.type === 'directory';
+      if (isFolderA !== isFolderB) {
+        return isFolderA ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    });
+    for (const node of nodes) {
+      if (node.children && Array.isArray(node.children)) {
+        sortNodesAlphabetically(node.children);
+      }
+    }
+    return nodes;
+  }
+
   // --- DATA FETCHING ---
   async function loadWorkspaceTree(showToastOnSuccess = false) {
     if (!state.token) return;
@@ -240,7 +269,10 @@
       }
       if (orderRes && orderRes.ok) {
         state.treeOrder = await orderRes.json();
+      } else {
+        state.treeOrder = {};
       }
+      sortNodesAlphabetically(state.files);
       if (showToastOnSuccess) {
         showToast('File tree refreshed');
       }
@@ -463,11 +495,13 @@
       return;
     }
 
+    resetWorkspaceState();
     state.cloningRepo = true;
-    showToast(`Cloning repository "${nameToDisplay}"...`);
+    showToast(`Clearing workspace and cloning repository "${nameToDisplay}"...`);
     render();
 
     try {
+      await apiFetch('/api/workspace/clear', { method: 'DELETE' }).catch(() => {});
       const res = await apiFetch('/api/repo/pull', {
         method: 'POST',
         body: JSON.stringify({ url: repoUrl, branch })
@@ -1056,6 +1090,87 @@
     return paths;
   }
 
+  async function getFilesFromDataTransferItems(dataTransferItems) {
+    const fileEntries = [];
+
+    async function traverseFileTree(item, path = '') {
+      return new Promise((resolve) => {
+        if (item.isFile) {
+          item.file((file) => {
+            fileEntries.push({
+              file,
+              path: path ? `${path}/${file.name}` : file.name
+            });
+            resolve();
+          });
+        } else if (item.isDirectory) {
+          const dirReader = item.createReader();
+          dirReader.readEntries(async (entries) => {
+            for (const entry of entries) {
+              await traverseFileTree(entry, path ? `${path}/${item.name}` : item.name);
+            }
+            resolve();
+          });
+        } else {
+          resolve();
+        }
+      });
+    }
+
+    const promises = [];
+    for (let i = 0; i < dataTransferItems.length; i++) {
+      const item = dataTransferItems[i];
+      if (item.kind === 'file') {
+        const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : (item.getAsEntry ? item.getAsEntry() : null);
+        if (entry) {
+          promises.push(traverseFileTree(entry));
+        } else {
+          const file = item.getAsFile();
+          if (file) {
+            fileEntries.push({ file, path: file.name });
+          }
+        }
+      }
+    }
+
+    await Promise.all(promises);
+    return fileEntries;
+  }
+
+  async function uploadFilesToWorkspace(fileEntries) {
+    if (!fileEntries || fileEntries.length === 0) return;
+    showToast(`Uploading ${fileEntries.length} file(s)...`);
+
+    const formData = new FormData();
+    for (const entry of fileEntries) {
+      formData.append('files', entry.file);
+      formData.append('paths', entry.path);
+    }
+
+    try {
+      const headers = {};
+      if (state.token) {
+        headers['Authorization'] = `Bearer ${state.token}`;
+      }
+      const res = await fetch('/api/workspace/upload', {
+        method: 'POST',
+        headers,
+        body: formData
+      });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || 'Upload complete!');
+        await loadWorkspaceTree(false);
+        render();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Failed to upload files', true);
+      }
+    } catch (err) {
+      showToast(`Upload error: ${err.message}`, true);
+    }
+  }
+
   function renderSidebar() {
     const allFolderPaths = getAllFolderPaths(state.files);
     const allFoldersExpanded = allFolderPaths.length > 0 && allFolderPaths.every(p => state.expandedFolders.has(p));
@@ -1079,19 +1194,37 @@
         </div>
 
         <div class="p-3 border-b dark:border-slate-800 border-slate-200 flex items-center justify-between text-slate-400">
-          <span class="text-xs font-semibold uppercase tracking-wider dark:text-slate-400 text-slate-600">Workspace Files</span>
+          <span class="text-xs font-semibold uppercase tracking-wider dark:text-slate-400 text-slate-600">Workspace</span>
           <div class="flex items-center space-x-1">
-            <button id="btn-new-file" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="New File">
-              <i class="fa-solid fa-file-circle-plus text-xs"></i>
-            </button>
-            <button id="btn-new-folder" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="New Folder">
-              <i class="fa-solid fa-folder-plus text-xs"></i>
-            </button>
+            <div class="relative inline-block text-left">
+              <button id="btn-add-menu" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="Add / Creation Options">
+                <i class="fa-solid fa-plus text-xs"></i>
+              </button>
+              <div id="dropdown-add-menu" class="${state.addMenuOpen ? '' : 'hidden'} absolute left-0 mt-1 w-44 dark:bg-slate-800 bg-white dark:border-slate-700 border-slate-200 border rounded-lg shadow-xl z-50 py-1 text-xs select-none">
+                <button id="menu-opt-new-file" class="w-full text-left px-3 py-1.5 dark:hover:bg-slate-700 hover:bg-slate-100 flex items-center space-x-2 dark:text-slate-200 text-slate-700 cursor-pointer">
+                  <i class="fa-solid fa-file-circle-plus text-blue-400"></i>
+                  <span>New File</span>
+                </button>
+                <button id="menu-opt-new-folder" class="w-full text-left px-3 py-1.5 dark:hover:bg-slate-700 hover:bg-slate-100 flex items-center space-x-2 dark:text-slate-200 text-slate-700 cursor-pointer">
+                  <i class="fa-solid fa-folder-plus text-amber-400"></i>
+                  <span>New Directory</span>
+                </button>
+                <div class="my-1 border-t dark:border-slate-700 border-slate-200"></div>
+                <button id="menu-opt-upload-file" class="w-full text-left px-3 py-1.5 dark:hover:bg-slate-700 hover:bg-slate-100 flex items-center space-x-2 dark:text-slate-200 text-slate-700 cursor-pointer">
+                  <i class="fa-solid fa-file-arrow-up text-emerald-400"></i>
+                  <span>Upload File</span>
+                </button>
+                <button id="menu-opt-upload-folder" class="w-full text-left px-3 py-1.5 dark:hover:bg-slate-700 hover:bg-slate-100 flex items-center space-x-2 dark:text-slate-200 text-slate-700 cursor-pointer">
+                  <i class="fa-solid fa-folder-arrow-up text-purple-400"></i>
+                  <span>Upload Folder</span>
+                </button>
+              </div>
+            </div>
             <button id="btn-sort-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="Sort Alphabetically (Directories First)">
               <i class="fa-solid fa-arrow-down-a-z text-xs"></i>
             </button>
             <button id="btn-toggle-folders" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="${allFoldersExpanded ? 'Collapse All Folders' : 'Explode All Folders'}">
-              <i class="fa-solid ${allFoldersExpanded ? 'fa-folder-closed text-amber-400' : 'fa-folder-tree'} text-xs"></i>
+              <i class="fa-solid ${allFoldersExpanded ? 'fa-angles-up text-amber-400' : 'fa-angles-down'} text-xs"></i>
             </button>
             <button id="btn-refresh-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="Refresh Tree">
               <i class="fa-solid fa-arrows-rotate text-xs"></i>
@@ -1101,6 +1234,9 @@
             </button>
           </div>
         </div>
+        <input type="file" id="input-upload-file" multiple class="hidden">
+        <input type="file" id="input-upload-folder" webkitdirectory directory multiple class="hidden">
+
         <div id="workspace-tree-container" class="flex-1 overflow-y-auto p-2 text-xs space-y-0.5 webkit-overflow-scrolling-touch rounded-lg transition-all duration-150 relative min-h-[150px] cursor-default" title="Drag items here or drop onto folders to move them">
           ${renderTreeNodes(state.files)}
         </div>
@@ -1116,21 +1252,25 @@
       return '';
     }
 
-    const dirOrder = state.treeOrder ? (state.treeOrder[parentPath] || []) : [];
+    const dirOrder = (state.treeOrder && state.treeOrder[parentPath]) ? state.treeOrder[parentPath] : null;
     let sortedNodes = [...nodes];
-    if (dirOrder && dirOrder.length > 0) {
+    if (dirOrder && Array.isArray(dirOrder) && dirOrder.length > 0) {
       sortedNodes.sort((a, b) => {
         const idxA = dirOrder.indexOf(a.name);
         const idxB = dirOrder.indexOf(b.name);
         if (idxA !== -1 && idxB !== -1) return idxA - idxB;
         if (idxA !== -1) return -1;
         if (idxB !== -1) return 1;
-        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        const isFolderA = a.type === 'folder' || a.type === 'directory';
+        const isFolderB = b.type === 'folder' || b.type === 'directory';
+        if (isFolderA !== isFolderB) return isFolderA ? -1 : 1;
         return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
       });
     } else {
       sortedNodes.sort((a, b) => {
-        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        const isFolderA = a.type === 'folder' || a.type === 'directory';
+        const isFolderB = b.type === 'folder' || b.type === 'directory';
+        if (isFolderA !== isFolderB) return isFolderA ? -1 : 1;
         return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
       });
     }
@@ -1152,7 +1292,8 @@
                  data-parent-path="${escapeHtml(parentPath)}"
                  data-folder-path="${escapeHtml(node.path)}"
                  title="${escapeHtml(node.name)} (Folder)">
-              <div class="flex items-center space-x-1.5 truncate pr-2 min-w-0 pointer-events-none">
+              <div class="flex items-center space-x-1 truncate pr-2 min-w-0 pointer-events-none">
+                <i class="fa-solid ${isExpanded ? 'fa-chevron-down' : 'fa-chevron-right'} text-[10px] text-slate-400 dark:text-slate-500 shrink-0 transition-transform duration-150 mr-0.5"></i>
                 <i class="fa-solid ${isExpanded ? 'fa-folder-open text-amber-400' : 'fa-folder text-amber-500'} shrink-0"></i>
                 <span class="truncate font-medium">${escapeHtml(node.name)}</span>
               </div>
@@ -2579,6 +2720,70 @@
         handleReorderOrMove(srcPath, '', false, '', '', 'inside');
       });
     }
+
+    initDesktopDropZone();
+  }
+
+  function initDesktopDropZone() {
+    const container = document.getElementById('workspace-tree-container');
+    if (!container) return;
+
+    let dragCounter = 0;
+
+    const isDesktopFileDrag = (e) => {
+      if (!e.dataTransfer || !e.dataTransfer.types) return false;
+      return Array.from(e.dataTransfer.types).includes('Files') && !state.draggedPath;
+    };
+
+    container.addEventListener('dragenter', (e) => {
+      if (!isDesktopFileDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounter++;
+      container.classList.add('ring-2', 'ring-blue-500', 'ring-inset', 'bg-blue-500/10', 'dark:bg-blue-500/20');
+    });
+
+    container.addEventListener('dragover', (e) => {
+      if (!isDesktopFileDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
+      container.classList.add('ring-2', 'ring-blue-500', 'ring-inset', 'bg-blue-500/10', 'dark:bg-blue-500/20');
+    });
+
+    container.addEventListener('dragleave', (e) => {
+      if (!isDesktopFileDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounter--;
+      if (dragCounter <= 0) {
+        dragCounter = 0;
+        container.classList.remove('ring-2', 'ring-blue-500', 'ring-inset', 'bg-blue-500/10', 'dark:bg-blue-500/20');
+      }
+    });
+
+    container.addEventListener('drop', async (e) => {
+      if (!isDesktopFileDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounter = 0;
+      container.classList.remove('ring-2', 'ring-blue-500', 'ring-inset', 'bg-blue-500/10', 'dark:bg-blue-500/20');
+
+      const items = e.dataTransfer.items;
+      let fileEntries = [];
+      if (items && items.length > 0) {
+        fileEntries = await getFilesFromDataTransferItems(items);
+      } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        fileEntries = Array.from(e.dataTransfer.files).map(f => ({
+          file: f,
+          path: f.webkitRelativePath || f.name
+        }));
+      }
+
+      if (fileEntries.length > 0) {
+        await uploadFilesToWorkspace(fileEntries);
+      }
+    });
   }
 
   function attachEvents() {
@@ -2699,17 +2904,70 @@
       render();
     });
 
-    // Sidebar Buttons
-    document.getElementById('btn-new-file')?.addEventListener('click', () => {
+    // Sidebar Buttons & Add Submenu
+    document.getElementById('btn-add-menu')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.addMenuOpen = !state.addMenuOpen;
+      render();
+    });
+
+    document.getElementById('menu-opt-new-file')?.addEventListener('click', () => {
+      state.addMenuOpen = false;
       state.modals.newFile = true;
       render();
     });
-    document.getElementById('btn-new-folder')?.addEventListener('click', () => {
+
+    document.getElementById('menu-opt-new-folder')?.addEventListener('click', () => {
+      state.addMenuOpen = false;
       state.modals.newFolder = true;
       render();
     });
+
+    document.getElementById('menu-opt-upload-file')?.addEventListener('click', () => {
+      state.addMenuOpen = false;
+      render();
+      document.getElementById('input-upload-file')?.click();
+    });
+
+    document.getElementById('menu-opt-upload-folder')?.addEventListener('click', () => {
+      state.addMenuOpen = false;
+      render();
+      document.getElementById('input-upload-folder')?.click();
+    });
+
+    document.getElementById('input-upload-file')?.addEventListener('change', async (e) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      const fileEntries = Array.from(files).map(f => ({
+        file: f,
+        path: f.name
+      }));
+      await uploadFilesToWorkspace(fileEntries);
+      e.target.value = '';
+    });
+
+    document.getElementById('input-upload-folder')?.addEventListener('change', async (e) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      const fileEntries = Array.from(files).map(f => ({
+        file: f,
+        path: f.webkitRelativePath || f.name
+      }));
+      await uploadFilesToWorkspace(fileEntries);
+      e.target.value = '';
+    });
+
     document.getElementById('btn-sort-tree')?.addEventListener('click', async () => {
       state.treeOrder = {};
+      sortNodesAlphabetically(state.files);
+      showToast('Workspace sorted alphabetically (directories first)');
+      render();
+
+      try {
+        await apiFetch('/api/workspace/order', { method: 'DELETE' });
+      } catch (err) {
+        console.warn('Failed DELETE order on server:', err);
+      }
       try {
         await apiFetch('/api/workspace/order', {
           method: 'POST',
@@ -2719,8 +2977,10 @@
       } catch (err) {
         console.warn('Failed to clear order on server:', err);
       }
-      showToast('Workspace sorted alphabetically (directories first)');
+
       await loadWorkspaceTree(false);
+      state.treeOrder = {};
+      sortNodesAlphabetically(state.files);
       render();
     });
     document.getElementById('btn-toggle-folders')?.addEventListener('click', () => {
@@ -3134,7 +3394,10 @@
         submitBtn.innerHTML = `<i class="fa-solid fa-spinner animate-spin text-xs"></i> <span>Pulling...</span>`;
       }
 
+      resetWorkspaceState();
+
       try {
+        await apiFetch('/api/workspace/clear', { method: 'DELETE' }).catch(() => {});
         const res = await apiFetch('/api/repo/pull', {
           method: 'POST',
           body: JSON.stringify({ url, branch })
@@ -3510,6 +3773,14 @@
       const container = document.getElementById('active-project-dropdown-container');
       if (container && !container.contains(e.target)) {
         state.activeProjectMenuOpen = false;
+        render();
+      }
+    }
+    if (state.addMenuOpen) {
+      const btn = document.getElementById('btn-add-menu');
+      const dropdown = document.getElementById('dropdown-add-menu');
+      if (btn && dropdown && !btn.contains(e.target) && !dropdown.contains(e.target)) {
+        state.addMenuOpen = false;
         render();
       }
     }

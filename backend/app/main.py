@@ -2,7 +2,7 @@ import uuid
 import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -255,6 +255,30 @@ def create_folder_route(payload: FileOperationRequest, current_user: UserDB = De
     try:
         GitService.create_folder(payload.path)
         return {"status": "success", "message": f"Folder created: {payload.path}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/workspace/upload")
+async def upload_workspace_files(
+    files: List[UploadFile] = File(...),
+    paths: Optional[List[str]] = Form(None),
+    current_user: UserDB = Depends(get_current_user)
+):
+    try:
+        saved_count = 0
+        for i, file in enumerate(files):
+            rel_path = (paths[i] if paths and i < len(paths) and paths[i] else getattr(file, 'filename', '')) or 'uploaded_file'
+            rel_path = rel_path.lstrip('/')
+            if not rel_path:
+                continue
+            content = await file.read()
+            target_file = (GitService.WORKSPACE_DIR / rel_path).resolve()
+            if not target_file.is_relative_to(GitService.WORKSPACE_DIR.resolve()):
+                continue
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            target_file.write_bytes(content)
+            saved_count += 1
+        return {"status": "success", "message": f"Successfully uploaded {saved_count} file(s)"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

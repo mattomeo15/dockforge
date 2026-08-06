@@ -1,5 +1,6 @@
 import os
 import shutil
+import stat
 import re
 import logging
 import git
@@ -51,60 +52,30 @@ def format_authed_github_url(url: str, token: Optional[str] = None) -> str:
 class GitService:
     @staticmethod
     def pull_repository(repo_url: str, branch: str = "main", github_token: Optional[str] = None) -> Dict[str, Any]:
-        """Pull or clone a Git repository into the workspace directory."""
+        """Pull or clone a Git repository into the workspace directory, ensuring workspace is cleanly wiped first."""
         formatted_url = format_authed_github_url(repo_url, github_token)
 
-        # If existing git repo, try pull first
-        if (WORKSPACE_DIR / ".git").exists():
-            try:
-                repo = git.Repo(WORKSPACE_DIR)
-                if github_token:
-                    repo.remote("origin").set_url(formatted_url)
-
-                with repo.config_writer() as config:
-                    config.set_value("user", "name", "DockForge User")
-                    config.set_value("user", "email", "dockforge@local")
-
-                pull_success = False
-                try:
-                    repo.remotes.origin.pull(branch)
-                    pull_success = True
-                except Exception:
-                    try:
-                        repo.remotes.origin.fetch(branch)
-                        repo.git.checkout("-B", branch)
-                        repo.git.reset("--hard", "FETCH_HEAD")
-                        pull_success = True
-                    except Exception:
-                        pass
-
-                if pull_success:
-                    commit_sha = repo.head.commit.hexsha[:7] if repo.head else "unknown"
-                    return {
-                        "status": "success",
-                        "message": f"Successfully pulled repository updates ({branch})",
-                        "commit_sha": commit_sha,
-                        "path": str(WORKSPACE_DIR)
-                    }
-            except Exception as pull_err:
-                logger.info(f"Re-initializing workspace repository via fresh clone...")
+        # Always wipe workspace completely before cloning a repository
+        GitService.clear_workspace()
 
         try:
-            if WORKSPACE_DIR.exists():
-                shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
-            WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-
             repo = git.Repo.clone_from(formatted_url, WORKSPACE_DIR, branch=branch)
-            commit_sha = repo.head.commit.hexsha[:7] if repo.head else "unknown"
-            return {
-                "status": "success",
-                "message": f"Successfully pulled repository ({branch})",
-                "commit_sha": commit_sha,
-                "path": str(WORKSPACE_DIR)
-            }
-        except Exception as err:
-            logger.error(f"Failed cloning repository {repo_url}: {err}")
-            raise RuntimeError(f"Git clone failed: {err}")
+        except Exception as clone_err:
+            logger.info(f"Clone with branch '{branch}' failed ({clone_err}), trying default branch...")
+            GitService.clear_workspace()
+            try:
+                repo = git.Repo.clone_from(formatted_url, WORKSPACE_DIR)
+            except Exception as clone_default_err:
+                logger.error(f"Failed cloning repository {repo_url}: {clone_default_err}")
+                raise RuntimeError(f"Git clone failed: {clone_default_err}")
+
+        commit_sha = repo.head.commit.hexsha[:7] if repo.head else "unknown"
+        return {
+            "status": "success",
+            "message": f"Successfully pulled repository ({branch})",
+            "commit_sha": commit_sha,
+            "path": str(WORKSPACE_DIR)
+        }
 
     @staticmethod
     def load_tree_order() -> Dict[str, List[str]]:
@@ -209,11 +180,18 @@ class GitService:
         """Clear all files in workspace directory."""
         try:
             if WORKSPACE_DIR.exists():
-                shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
+                def remove_readonly(func, path, _):
+                    try:
+                        os.chmod(path, stat.S_IWRITE | stat.S_IWUSR)
+                        func(path)
+                    except Exception:
+                        pass
+
+                shutil.rmtree(WORKSPACE_DIR, onerror=remove_readonly)
             WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
         except Exception as err:
             logger.error(f"Error clearing workspace: {err}")
-            raise err
+            WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def delete_path(rel_path: str) -> None:

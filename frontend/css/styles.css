@@ -1,6 +1,8 @@
 /* Custom CSS for DockForge */
 @import "tailwindcss";
 
+@variant dark (&:where(.dark, .dark *));
+
 @layer utilities {
   /* Scrollbar Styling */
   ::-webkit-scrollbar {
