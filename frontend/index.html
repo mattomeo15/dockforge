@@ -6,24 +6,6 @@
   <title>DockForge | Self-Hosted Docker CI/CD IDE</title>
   <link rel="icon" type="image/png" href="/frontend/public/logo.png">
   <link rel="shortcut icon" href="/frontend/public/logo.png">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            brand: {
-              50: '#f0f7ff',
-              500: '#0066ff',
-              600: '#0052cc',
-              700: '#003d99',
-            }
-          }
-        }
-      }
-    }
-  </script>
   <link rel="stylesheet" href="/css/styles.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
@@ -31,6 +13,6 @@
   <div id="app" class="flex flex-col h-screen overflow-hidden">
     <!-- Main SPA Container rendered via JS -->
   </div>
-  <script src="/js/app.js"></script>
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>

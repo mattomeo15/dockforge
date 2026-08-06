@@ -515,16 +515,19 @@ async def websocket_build_logs(websocket: WebSocket, job_id: str, db: Session = 
 frontend_dir = Path("frontend")
 dist_dir = Path("dist")
 
-if frontend_dir.exists():
+if dist_dir.exists():
+    if (dist_dir / "assets").exists():
+        app.mount("/assets", StaticFiles(directory="dist/assets"), name="dist_assets")
+    if (dist_dir / "frontend/public").exists():
+        app.mount("/frontend/public", StaticFiles(directory="dist/frontend/public"), name="dist_frontend_public")
+elif frontend_dir.exists():
     app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
-if (frontend_dir / "public").exists():
-    app.mount("/public", StaticFiles(directory="frontend/public"), name="public")
-if (frontend_dir / "css").exists():
-    app.mount("/css", StaticFiles(directory="frontend/css"), name="css")
-if (frontend_dir / "js").exists():
-    app.mount("/js", StaticFiles(directory="frontend/js"), name="js")
-if dist_dir.exists() and (dist_dir / "assets").exists():
-    app.mount("/assets", StaticFiles(directory="dist/assets"), name="dist_assets")
+    if (frontend_dir / "public").exists():
+        app.mount("/public", StaticFiles(directory="frontend/public"), name="public")
+    if (frontend_dir / "css").exists():
+        app.mount("/css", StaticFiles(directory="frontend/css"), name="css")
+    if (frontend_dir / "js").exists():
+        app.mount("/js", StaticFiles(directory="frontend/js"), name="js")
 
 @app.get("/{full_path:path}")
 def serve_spa(full_path: str):
@@ -533,10 +536,13 @@ def serve_spa(full_path: str):
     
     if full_path:
         # Check logo.png alias
-        if full_path == "logo.png" and (frontend_dir / "public/logo.png").is_file():
-            return FileResponse(frontend_dir / "public/logo.png")
+        if full_path == "logo.png":
+            if dist_dir.exists() and (dist_dir / "frontend/public/logo.png").is_file():
+                return FileResponse(dist_dir / "frontend/public/logo.png")
+            if (frontend_dir / "public/logo.png").is_file():
+                return FileResponse(frontend_dir / "public/logo.png")
 
-        # 1. Check inside dist_dir
+        # 1. Check inside dist_dir (highest priority when built)
         if dist_dir.exists():
             file_dist = dist_dir / full_path
             if file_dist.is_file():
