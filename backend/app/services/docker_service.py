@@ -40,7 +40,7 @@ class DockerService:
         auto_prune: bool = True,
         log_callback: Optional[Callable[[str], None]] = None
     ) -> bool:
-        """Execute ONLY docker build -t <username>/<image_name>:<tag> . without automatic pushing."""
+        """Execute docker build -t <username>/<image_name>:<tag> with targeted project auto-prune."""
         if DockerService.is_building:
             raise RuntimeError("Another build or push job is currently running.")
 
@@ -67,8 +67,23 @@ class DockerService:
 
             if has_docker_socket:
                 await emit("🐳 Local Docker daemon socket detected at /var/run/docker.sock")
+
+                # --- STEP 1: CAPTURE OLD IMAGE ID BEFORE BUILDING ---
+                old_image_id = None
+                try:
+                    proc_id = await asyncio.create_subprocess_shell(
+                        f'docker image inspect --format "{{{{.Id}}}}" "{full_image_tag}"',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL
+                    )
+                    stdout_id, _ = await proc_id.communicate()
+                    if proc_id.returncode == 0:
+                        old_image_id = stdout_id.decode().strip()
+                except Exception:
+                    pass
+
+                # --- STEP 2: EXECUTE DOCKER BUILD ---
                 await emit(f"🛠️ Executing: docker build -t {full_image_tag} -f {dockerfile_path} .")
-                
                 build_cmd = f"docker build -t {full_image_tag} -f {dockerfile_path} ."
                 proc = await asyncio.create_subprocess_shell(
                     build_cmd,
@@ -96,10 +111,25 @@ class DockerService:
 
                 await emit("✅ Docker image compiled and tagged successfully!")
 
-                # Auto-prune previous project builds if enabled
-                if auto_prune:
-                    await emit(f"🧹 Executing scoped project build cleanup: docker image prune -f --filter \"dangling=true\"")
-                    prune_cmd = "docker image prune -f --filter \"dangling=true\""
+                # --- STEP 3: CAPTURE NEW IMAGE ID ---
+                new_image_id = None
+                try:
+                    proc_new_id = await asyncio.create_subprocess_shell(
+                        f'docker image inspect --format "{{{{.Id}}}}" "{full_image_tag}"',
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL
+                    )
+                    stdout_new_id, _ = await proc_new_id.communicate()
+                    if proc_new_id.returncode == 0:
+                        new_image_id = stdout_new_id.decode().strip()
+                        await emit(f"🆔 New Image ID: {new_image_id[:12]}")
+                except Exception:
+                    pass
+
+                # --- STEP 4: TARGETED AUTO-PRUNE PREVIOUS BUILD IMAGE ---
+                if auto_prune and old_image_id and new_image_id and old_image_id != new_image_id:
+                    await emit(f"🧹 Executing targeted cleanup for previous build ({old_image_id[:12]})...")
+                    prune_cmd = f"docker rmi -f {old_image_id}"
                     proc_prune = await asyncio.create_subprocess_shell(
                         prune_cmd,
                         cwd=str(WORKSPACE_DIR),
@@ -112,7 +142,8 @@ class DockerService:
                             break
                         await emit(line.decode().rstrip())
                     await proc_prune.wait()
-                    await emit(f"INFO: Pruned old untagged build layers for project '{image_name}'.")
+                    await emit(f"INFO: Successfully pruned previous image build layer for '{full_image_tag}'.")
+
             else:
                 # Sandbox mode
                 await emit("⚙️ Operating in DockForge Build Engine sandbox mode...")
@@ -136,12 +167,14 @@ class DockerService:
                 await asyncio.sleep(0.5)
                 await emit("Step 6/6 : EXPOSE 8000")
                 await emit(f" ---> Successfully built image: {full_image_tag}")
+                await emit("🆔 New Image ID: sha256:78e10fa1b931a")
 
                 if auto_prune:
-                    await emit(f"🧹 Executing scoped project build cleanup: docker image prune -f --filter \"dangling=true\"")
+                    await emit(f"🧹 Executing scoped project build cleanup for {full_image_tag}...")
                     await asyncio.sleep(0.3)
-                    await emit("Total reclaimed space: 0B (Dangling build layers pruned)")
-                    await emit(f"INFO: Pruned old untagged build layers for project '{image_name}'.")
+                    await emit("Untagged: sha256:0a4c95f1b2c3...")
+                    await emit("Deleted: sha256:0a4c95f1b2c3...")
+                    await emit(f"INFO: Pruned previous build image for '{image_name}'.")
 
             await emit("==================================================")
             await emit(f"✨ DOCKER BUILD FINISHED SUCCESSFULLY [{full_image_tag}] ✨")
