@@ -103,13 +103,7 @@ class DockerService:
                     await emit("❌ Docker build failed with non-zero exit status.")
                     return False
 
-                # Tag as local dockforge if needed
-                if full_image_tag != f"dockforge:{tag}":
-                    tag_cmd = f"docker tag {full_image_tag} dockforge:{tag}"
-                    proc_tag = await asyncio.create_subprocess_shell(tag_cmd, cwd=str(WORKSPACE_DIR))
-                    await proc_tag.wait()
-
-                await emit("✅ Docker image compiled and tagged successfully!")
+                await emit("✅ Docker image compiled successfully!")
 
                 # --- STEP 3: CAPTURE NEW IMAGE ID ---
                 new_image_id = None
@@ -236,12 +230,22 @@ class DockerService:
                     else:
                         await emit(f"⚠️ Docker Hub login warning: {stderr.decode()}")
 
-                await emit(f"🏷️ Tagging image: docker tag dockforge:{tag} {full_image_tag}")
-                tag_proc = await asyncio.create_subprocess_shell(
-                    f"docker tag dockforge:{tag} {full_image_tag}",
-                    cwd=str(WORKSPACE_DIR)
+                # Check if target full_image_tag exists locally
+                check_proc = await asyncio.create_subprocess_shell(
+                    f'docker image inspect --format "{{{{.Id}}}}" "{full_image_tag}"',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL
                 )
-                await tag_proc.wait()
+                await check_proc.communicate()
+
+                if check_proc.returncode != 0:
+                    fallback_tag = f"{image_name}:{tag}" if image_name else f"dockforge:{tag}"
+                    await emit(f"🏷️ Tagging image: docker tag {fallback_tag} {full_image_tag}")
+                    tag_proc = await asyncio.create_subprocess_shell(
+                        f"docker tag {fallback_tag} {full_image_tag}",
+                        cwd=str(WORKSPACE_DIR)
+                    )
+                    await tag_proc.wait()
 
                 await emit(f"⬆️ Executing: docker push {full_image_tag}")
                 push_cmd = f"docker push {full_image_tag}"
@@ -268,8 +272,6 @@ class DockerService:
                 await emit("⚙️ Operating in DockForge Push Engine sandbox mode...")
                 if dockerhub_username:
                     await emit(f"🔑 Authenticated with Docker Hub as '{dockerhub_username}'")
-                await emit(f"🏷️ Tagging local image 'dockforge:{tag}' as '{full_image_tag}'")
-                await asyncio.sleep(0.5)
                 await emit(f"⬆️ Pushing container image [docker.io/{full_image_tag}] to Docker Hub...")
                 await asyncio.sleep(0.8)
                 await emit(f"The push refers to repository [docker.io/{full_image_tag.split(':')[0]}]")

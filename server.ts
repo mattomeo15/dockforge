@@ -1341,10 +1341,22 @@ async function startServer() {
             }
           }
 
-          await emit(`🏷️ Tagging image: docker tag ${localImageName}:${job.tag} ${fullImageTag}`);
-          const tagProc = spawn("docker", ["tag", `${localImageName}:${job.tag}`, fullImageTag], { cwd: WORKSPACE_DIR });
-          activeChildProcesses.add(tagProc);
-          await new Promise((resolve) => tagProc.on("close", resolve));
+          // Inspect if target image tag exists before tagging
+          const inspectProc = spawn("docker", ["image", "inspect", "--format", "{{.Id}}", fullImageTag], { cwd: WORKSPACE_DIR });
+          let inspectCode = 1;
+          await new Promise((resolve) => {
+            inspectProc.on("close", (code) => {
+              inspectCode = code ?? 1;
+              resolve(null);
+            });
+          });
+
+          if (inspectCode !== 0) {
+            await emit(`🏷️ Tagging image: docker tag ${localImageName}:${job.tag} ${fullImageTag}`);
+            const tagProc = spawn("docker", ["tag", `${localImageName}:${job.tag}`, fullImageTag], { cwd: WORKSPACE_DIR });
+            activeChildProcesses.add(tagProc);
+            await new Promise((resolve) => tagProc.on("close", resolve));
+          }
 
           await emit(`⬆️ Executing: docker push ${fullImageTag}`);
           const pushProc = spawn("docker", ["push", fullImageTag], {
@@ -1411,12 +1423,6 @@ async function startServer() {
           buildProc.stderr.on("data", (data) => emit(data.toString().trim()));
 
           await new Promise((resolve) => buildProc.on("close", resolve));
-
-          if (fullImageTag !== `${localImageName}:${job.tag}`) {
-            const tagProc = spawn("docker", ["tag", fullImageTag, `${localImageName}:${job.tag}`], { cwd: WORKSPACE_DIR });
-            activeChildProcesses.add(tagProc);
-            await new Promise((resolve) => tagProc.on("close", resolve));
-          }
 
           // Auto-prune previous project builds if enabled
           const autoPrune = currentSettings.auto_prune_project_builds !== false;
