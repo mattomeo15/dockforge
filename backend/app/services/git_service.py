@@ -3,9 +3,10 @@ import shutil
 import stat
 import re
 import logging
+import base64
 import git
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 logger = logging.getLogger("dockforge.git")
 
@@ -139,13 +140,48 @@ class GitService:
         return tree
 
     @staticmethod
-    def read_file(file_path: str) -> str:
+    def read_file(file_path: str, raw: bool = False) -> Union[dict, str]:
         """Read content of a workspace file."""
         target_file = (WORKSPACE_DIR / file_path).resolve()
         if not target_file.is_relative_to(WORKSPACE_DIR.resolve()) or not target_file.exists():
             raise FileNotFoundError("File not found in workspace")
+        
+        ext = target_file.suffix.lower()
+        image_mimes = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+            ".ico": "image/x-icon",
+            ".bmp": "image/bmp",
+        }
+
+        if ext in image_mimes:
+            mime = image_mimes[ext]
+            if raw:
+                return {"file_path": target_file, "mime_type": mime}
+            
+            try:
+                raw_bytes = target_file.read_bytes()
+                b64_str = base64.b64encode(raw_bytes).decode("utf-8")
+                data_url = f"data:{mime};base64,{b64_str}"
+                return {
+                    "path": file_path,
+                    "content": data_url,
+                    "isImage": True,
+                    "mimeType": mime,
+                    "format": ext.replace(".", "").upper(),
+                    "size": len(raw_bytes)
+                }
+            except Exception as err:
+                logger.error(f"Error reading image file {file_path}: {err}")
+                raise err
+
         try:
-            return target_file.read_text(encoding="utf-8", errors="replace")
+            content = target_file.read_text(encoding="utf-8", errors="replace")
+            return {"path": file_path, "content": content, "isImage": False}
         except Exception as err:
             logger.error(f"Error reading file {file_path}: {err}")
             raise err
@@ -158,7 +194,11 @@ class GitService:
             raise ValueError("Invalid target path")
         try:
             target_file.parent.mkdir(parents=True, exist_ok=True)
-            target_file.write_text(content, encoding="utf-8")
+            if isinstance(content, str) and content.startswith("data:") and ";base64," in content:
+                b64_data = content.split(";base64,")[-1]
+                target_file.write_bytes(base64.b64decode(b64_data))
+            else:
+                target_file.write_text(content or "", encoding="utf-8")
         except Exception as err:
             logger.error(f"Error writing file {file_path}: {err}")
             raise err

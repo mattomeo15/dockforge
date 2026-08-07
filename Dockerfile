@@ -25,8 +25,9 @@ RUN mkdir -p /etc/apt/keyrings \
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Only copy the built frontend
+# Copy built frontend & frontend source assets
 COPY --from=frontend-builder /app/dist ./dist
+COPY frontend ./frontend
 
 # Copy backend
 COPY backend ./backend

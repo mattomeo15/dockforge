@@ -233,10 +233,14 @@ def get_file_tree(current_user: UserDB = Depends(get_current_user)):
     return GitService.get_file_tree()
 
 @app.get("/api/workspace/file")
-def read_file(path: str, current_user: UserDB = Depends(get_current_user)):
+def read_file(path: str, raw: bool = False, current_user: UserDB = Depends(get_current_user)):
     try:
-        content = GitService.read_file(path)
-        return {"path": path, "content": content}
+        res = GitService.read_file(path, raw=raw)
+        if raw and isinstance(res, dict) and "file_path" in res:
+            return FileResponse(res["file_path"], media_type=res.get("mime_type"))
+        if isinstance(res, dict):
+            return res
+        return {"path": path, "content": res}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -575,12 +579,22 @@ def serve_spa(full_path: str):
         raise HTTPException(status_code=404, detail="Not Found")
     
     if full_path:
-        # Check logo.png alias
-        if full_path == "logo.png":
-            if dist_dir.exists() and (dist_dir / "frontend/public/logo.png").is_file():
-                return FileResponse(dist_dir / "frontend/public/logo.png")
-            if (frontend_dir / "public/logo.png").is_file():
-                return FileResponse(frontend_dir / "public/logo.png")
+        # Check logo image requests
+        if full_path in ["logo.png", "public/logo.png", "frontend/public/logo.png", "assets/logo.png"]:
+            logo_candidates = [
+                dist_dir / "logo.png",
+                dist_dir / "frontend/public/logo.png",
+                dist_dir / "public/logo.png",
+                dist_dir / "assets/logo.png",
+                frontend_dir / "public/logo.png",
+                frontend_dir / "logo.png",
+                Path("frontend/public/logo.png"),
+                Path("public/logo.png"),
+                Path("logo.png")
+            ]
+            for candidate in logo_candidates:
+                if candidate.is_file():
+                    return FileResponse(candidate)
 
         # 1. Check inside dist_dir (highest priority when built)
         if dist_dir.exists():

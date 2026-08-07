@@ -1489,9 +1489,13 @@ async function startServer() {
   app.use("/js", express.static(path.join(frontendPath, "js")));
 
   app.get(["/logo.png", "/public/logo.png", "/frontend/public/logo.png"], (req, res) => {
-    const logoFile = path.join(frontendPublicPath, "logo.png");
-    if (fs.existsSync(logoFile)) {
-      return res.sendFile(logoFile);
+    const possibleFiles = [
+      path.join(distPath, "logo.png"),
+      path.join(frontendPublicPath, "logo.png"),
+      path.join(publicPath, "logo.png")
+    ];
+    for (const f of possibleFiles) {
+      if (fs.existsSync(f)) return res.sendFile(f);
     }
     res.status(404).send("Not found");
   });

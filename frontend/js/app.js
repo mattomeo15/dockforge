@@ -771,7 +771,7 @@ import '../css/styles.css';
         <div class="w-full max-w-md dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl shadow-2xl overflow-hidden p-8 dark:text-slate-100 text-slate-800">
           <div class="text-center mb-8">
             <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600/10 border border-blue-500/20 text-blue-500 mb-4 overflow-hidden p-2">
-              <img src="/frontend/public/logo.png" alt="DockForge Logo" class="w-full h-full object-contain" onerror="this.onerror=null; this.src='/public/logo.png';" />
+              <img src="/logo.png" alt="DockForge Logo" class="w-full h-full object-contain" onerror="this.onerror=null; this.src='/frontend/public/logo.png';" />
             </div>
             <h1 class="text-2xl font-bold dark:text-white text-slate-900 tracking-tight">Welcome to DockForge</h1>
             <p class="text-sm dark:text-slate-400 text-slate-500 mt-1">Self-Hosted Docker CI/CD & Browser IDE</p>
@@ -877,7 +877,7 @@ import '../css/styles.css';
         <div class="h-14 px-4 flex items-center justify-between">
           <div class="flex items-center space-x-2 truncate">
             <div class="flex items-center shrink-0">
-              <img src="/frontend/public/logo.png" alt="DockForge Logo" class="h-[45px] w-[45px] object-contain" onerror="this.onerror=null; this.src='/public/logo.png';" />
+              <img src="/logo.png" alt="DockForge Logo" class="h-[45px] w-[45px] object-contain" onerror="this.onerror=null; this.src='/frontend/public/logo.png';" />
               <span class="font-bold text-2xl dark:text-white text-slate-900 tracking-wide uppercase ml-2">DOCKFORGE</span>
             </div>
 
