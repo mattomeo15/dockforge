@@ -1,3 +1,5 @@
+import '../css/styles.css';
+
 /**
  * DockForge - Self-Hosted Docker CI/CD IDE
  * Vanilla JS SPA Engine

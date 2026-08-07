@@ -198,11 +198,6 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
-  // Static Frontend Assets
-  app.use("/frontend", express.static(path.join(process.cwd(), "frontend")));
-  app.use("/css", express.static(path.join(process.cwd(), "frontend", "css")));
-  app.use("/js", express.static(path.join(process.cwd(), "frontend", "js")));
-
   // Middleware: Auth check
   const authenticateToken = (req: any, res: any, next: any) => {
     const authHeader = req.headers["authorization"];
