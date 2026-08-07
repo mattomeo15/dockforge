@@ -1001,25 +1001,105 @@ async function startServer() {
     res.json({ image_name: imageName, tags: ["latest", "v1.0.0", "v1.1.0"] });
   });
 
-  // Build Jobs List & Logs
-  app.get("/api/jobs", authenticateToken, (req, res) => {
-    const jobs = readJsonFile(JOBS_FILE, []);
-    const formatted = jobs.map((j: any) => ({
-      ...j,
-      job_type: j.job_type || j.action || "build",
-      action: j.action || j.job_type || "build",
-    }));
-    res.json(formatted);
+  // Build Jobs List & Logs (Image-Centric History)
+  const HISTORY_FILE = path.join(DATA_DIR, "image_history.json");
+
+  app.get(["/api/jobs", "/api/history", "/api/images"], authenticateToken, (req, res) => {
+    const history = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
+    const jobs = readJsonFile<any[]>(JOBS_FILE, []);
+
+    const historyItems = Object.values(history).reverse().map((item: any) => {
+      const target_tag = item.target_tag || "";
+      const img_name = target_tag.includes(":") ? target_tag.split(":")[0] : target_tag;
+      const tag_val = target_tag.includes(":") ? target_tag.split(":")[1] : "latest";
+      return {
+        id: item.image_id,
+        image_id: item.image_id,
+        target_tag: target_tag,
+        image_name: img_name,
+        tag: tag_val,
+        created: item.created,
+        build_status: item.build_status || "SUCCESS",
+        push_status: item.push_status || null,
+        build_log: item.build_log || null,
+        push_log: item.push_log || null,
+        status: item.build_status === "SUCCESS" ? "success" : "failure",
+        action: "build"
+      };
+    });
+
+    const knownIds = new Set(historyItems.flatMap((h: any) => [h.id, h.image_id]));
+    const missingJobs = jobs.filter((j: any) => !knownIds.has(j.id) && !knownIds.has((j.id || "").replace("job_", "img_"))).map((j: any) => {
+      const target_tag = `${j.image_name || "dockforge"}:${j.tag || "latest"}`;
+      const img_id = (j.id || "").replace("job_", "img_").substring(0, 12);
+      const createdDate = j.started_at ? new Date(j.started_at).toLocaleString("en-GB", {
+        day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true
+      }) : "Just now";
+      return {
+        id: img_id,
+        image_id: img_id,
+        target_tag: target_tag,
+        image_name: j.image_name || "dockforge",
+        tag: j.tag || "latest",
+        created: createdDate,
+        build_status: j.status === "success" ? "SUCCESS" : j.status === "failure" ? "FAILED" : "BUILDING",
+        push_status: j.action === "push" ? (j.status === "success" ? "PUSHED" : "FAILED") : null,
+        build_log: `${j.id}.log`,
+        push_log: null,
+        status: j.status,
+        action: j.action || "build"
+      };
+    });
+
+    res.json([...historyItems, ...missingJobs]);
   });
 
-  app.get("/api/jobs/:jobId/logs", authenticateToken, (req, res) => {
+  app.get(["/api/jobs/:jobId/logs", "/api/history/:jobId/logs"], authenticateToken, (req, res) => {
     const { jobId } = req.params;
-    const logPath = path.join(LOGS_DIR, `${jobId}.log`);
-    if (fs.existsSync(logPath)) {
-      const logs = fs.readFileSync(logPath, "utf-8");
-      return res.json({ job_id: jobId, logs });
+    const history = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
+    let item = history[jobId];
+    if (!item) {
+      for (const k of Object.keys(history)) {
+        if (k === jobId || history[k].image_id === jobId || history[k].target_tag === jobId) {
+          item = history[k];
+          break;
+        }
+      }
     }
-    res.status(404).json({ detail: "Log file not found" });
+
+    let logsText = "";
+    if (item) {
+      if (item.build_log) {
+        const buildPath = path.join(LOGS_DIR, item.build_log);
+        if (fs.existsSync(buildPath)) {
+          logsText += `=== BUILD LOG [${item.image_id}] ===\n` + fs.readFileSync(buildPath, "utf-8") + "\n";
+        }
+      }
+      if (item.push_log) {
+        const pushPath = path.join(LOGS_DIR, item.push_log);
+        if (fs.existsSync(pushPath)) {
+          logsText += `\n=== PUSH LOG [${item.image_id}] ===\n` + fs.readFileSync(pushPath, "utf-8") + "\n";
+        }
+      }
+    }
+
+    if (!logsText) {
+      const fallbackPath = path.join(LOGS_DIR, `${jobId}.log`);
+      if (fs.existsSync(fallbackPath)) {
+        logsText = fs.readFileSync(fallbackPath, "utf-8");
+      } else if (fs.existsSync(LOGS_DIR)) {
+        const files = fs.readdirSync(LOGS_DIR);
+        const matched = files.find(f => f.includes(jobId));
+        if (matched) {
+          logsText = fs.readFileSync(path.join(LOGS_DIR, matched), "utf-8");
+        }
+      }
+    }
+
+    if (logsText) {
+      return res.json({ job_id: jobId, logs: logsText });
+    }
+    res.json({ job_id: jobId, logs: "No logs recorded for this image." });
   });
 
   // Trigger Build Job (Build image only)
@@ -1138,6 +1218,8 @@ async function startServer() {
         ws.send(line);
       }
     };
+
+    let fullImageTag = "dockforge:latest";
 
     try {
       const action = job.action || "build";
@@ -1313,7 +1395,7 @@ async function startServer() {
       if (dockerUser && !targetRepo.includes("/")) {
         targetRepo = `${dockerUser}/${targetRepo}`;
       }
-      const fullImageTag = `${targetRepo}:${job.tag}`;
+      fullImageTag = `${targetRepo}:${job.tag}`;
 
       if (action === "push") {
         await emit("==================================================");
@@ -1392,6 +1474,31 @@ async function startServer() {
         await emit("==================================================");
         await emit(`✨ DOCKER PUSH FINISHED SUCCESSFULLY [${fullImageTag}] ✨`);
         await emit("==================================================");
+
+        // Update image history for push
+        const pushHistory = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
+        let pushImgId = Object.keys(pushHistory).find((k) => pushHistory[k].target_tag === fullImageTag);
+        if (!pushImgId) {
+          pushImgId = (jobId || "").replace("job_", "img_").substring(0, 12);
+        }
+        const pushLogName = `${pushImgId}_push.log`;
+        const pushLogPath = path.join(LOGS_DIR, pushLogName);
+        if (fs.existsSync(logPath)) {
+          fs.copyFileSync(logPath, pushLogPath);
+        }
+        const existingPush = pushHistory[pushImgId] || {};
+        pushHistory[pushImgId] = {
+          image_id: pushImgId,
+          target_tag: fullImageTag,
+          created: existingPush.created || new Date().toLocaleString("en-GB", {
+            day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true
+          }),
+          build_status: existingPush.build_status || "SUCCESS",
+          push_status: "PUSHED",
+          build_log: existingPush.build_log || `${pushImgId}_build.log`,
+          push_log: pushLogName
+        };
+        writeJsonFile(HISTORY_FILE, pushHistory);
       } else {
         // Default action === 'build'
         const rawRepoName = job.image_name || "dockforge";
@@ -1468,6 +1575,38 @@ async function startServer() {
         await emit("==================================================");
         await emit(`✨ DOCKER BUILD FINISHED SUCCESSFULLY [${fullImageTag}] ✨`);
         await emit("==================================================");
+
+        // Record successful build in image_history.json
+        let newImgId = (jobId || "").replace("job_", "img_").substring(0, 12);
+        if (dockerSockExists) {
+          try {
+            const { stdout } = await execAsync(`docker image inspect --format "{{.Id}}" "${fullImageTag}"`, { cwd: WORKSPACE_DIR });
+            if (stdout.trim()) {
+              newImgId = stdout.trim().replace("sha256:", "").substring(0, 12);
+            }
+          } catch (e) {}
+        }
+
+        const buildLogName = `${newImgId}_build.log`;
+        const buildLogPath = path.join(LOGS_DIR, buildLogName);
+        if (fs.existsSync(logPath)) {
+          fs.copyFileSync(logPath, buildLogPath);
+        }
+
+        const buildHistory = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
+        const existingBuild = buildHistory[newImgId] || {};
+        buildHistory[newImgId] = {
+          image_id: newImgId,
+          target_tag: fullImageTag,
+          created: new Date().toLocaleString("en-GB", {
+            day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true
+          }),
+          build_status: "SUCCESS",
+          push_status: existingBuild.push_status || null,
+          build_log: buildLogName,
+          push_log: existingBuild.push_log || null
+        };
+        writeJsonFile(HISTORY_FILE, buildHistory);
       }
 
       job.status = "success";
@@ -1476,6 +1615,27 @@ async function startServer() {
       await emit(`💥 Error during build execution: ${e.message}`);
       job.status = "failure";
       job.completed_at = new Date().toISOString();
+
+      const failImgId = (jobId || "").replace("job_", "fail_").substring(0, 12);
+      const failLogName = `${failImgId}_build.log`;
+      const failLogPath = path.join(LOGS_DIR, failLogName);
+      if (fs.existsSync(logPath)) {
+        fs.copyFileSync(logPath, failLogPath);
+      }
+
+      const failHistory = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
+      failHistory[failImgId] = {
+        image_id: failImgId,
+        target_tag: fullImageTag || "dockforge:latest",
+        created: new Date().toLocaleString("en-GB", {
+          day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true
+        }),
+        build_status: "FAILED",
+        push_status: null,
+        build_log: failLogName,
+        push_log: null
+      };
+      writeJsonFile(HISTORY_FILE, failHistory);
     } finally {
       isBuildingGlobal = false;
       writeJsonFile(JOBS_FILE, jobs);
@@ -1499,6 +1659,18 @@ async function startServer() {
       path.join(distPath, "logo.png"),
       path.join(frontendPublicPath, "logo.png"),
       path.join(publicPath, "logo.png")
+    ];
+    for (const f of possibleFiles) {
+      if (fs.existsSync(f)) return res.sendFile(f);
+    }
+    res.status(404).send("Not found");
+  });
+
+  app.get(["/chime.wav", "/public/chime.wav", "/frontend/public/chime.wav"], (req, res) => {
+    const possibleFiles = [
+      path.join(distPath, "chime.wav"),
+      path.join(frontendPublicPath, "chime.wav"),
+      path.join(publicPath, "chime.wav")
     ];
     for (const f of possibleFiles) {
       if (fs.existsSync(f)) return res.sendFile(f);

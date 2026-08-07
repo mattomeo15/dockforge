@@ -400,34 +400,67 @@ async def fetch_dockerhub_tags(
 
 # Docker Build & Push Routes
 @app.get("/api/jobs")
-def list_build_jobs(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
-    jobs = db.query(BuildJobDB).order_by(BuildJobDB.started_at.desc()).all()
-    return [
-        {
-            "id": j.id,
-            "repo_url": j.repo_url,
-            "image_name": j.image_name,
-            "tag": j.tag,
-            "status": j.status,
-            "action": getattr(j, "action", "build") or "build",
-            "job_type": getattr(j, "job_type", None) or getattr(j, "action", "build") or "build",
-            "started_at": j.started_at.isoformat() if j.started_at else None,
-            "completed_at": j.completed_at.isoformat() if j.completed_at else None,
-            "commit_sha": j.commit_sha
-        }
-        for j in jobs
-    ]
+@app.get("/api/history")
+@app.get("/api/images")
+def list_build_history(db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+    history = DockerService.load_image_history()
+    result = []
+    # Sort items by creation or reverse order so newest is first
+    for img_id, item in list(history.items())[::-1]:
+        target_tag = item.get("target_tag", "")
+        img_name = target_tag.split(":")[0] if ":" in target_tag else target_tag
+        tag_val = target_tag.split(":")[1] if ":" in target_tag else "latest"
+        result.append({
+            "id": img_id,
+            "image_id": img_id,
+            "target_tag": target_tag,
+            "image_name": img_name,
+            "tag": tag_val,
+            "created": item.get("created"),
+            "build_status": item.get("build_status", "SUCCESS"),
+            "push_status": item.get("push_status"),
+            "build_log": item.get("build_log"),
+            "push_log": item.get("push_log"),
+            "status": "success" if item.get("build_status") == "SUCCESS" else "failure",
+            "action": "build"
+        })
+    return result
 
 @app.get("/api/jobs/{job_id}/logs")
+@app.get("/api/history/{job_id}/logs")
 def get_job_logs(job_id: str, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
-    job = db.query(BuildJobDB).filter(BuildJobDB.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    history = DockerService.load_image_history()
+    item = history.get(job_id)
+    if not item:
+        for k, v in history.items():
+            if k == job_id or v.get("image_id") == job_id or job_id in (v.get("build_log", ""), v.get("push_log", "")):
+                item = v
+                break
+
+    logs_text = ""
+    if item:
+        build_log_path = LOGS_DIR / item["build_log"] if item.get("build_log") else None
+        push_log_path = LOGS_DIR / item["push_log"] if item.get("push_log") else None
+        
+        if build_log_path and build_log_path.exists():
+            logs_text += f"=== BUILD LOG [{item.get('image_id')}] ===\n" + build_log_path.read_text(encoding="utf-8") + "\n"
+        if push_log_path and push_log_path.exists():
+            logs_text += f"\n=== PUSH LOG [{item.get('image_id')}] ===\n" + push_log_path.read_text(encoding="utf-8") + "\n"
+
+    if not logs_text:
+        candidate_files = list(LOGS_DIR.glob(f"*{job_id}*"))
+        if candidate_files:
+            logs_text = candidate_files[0].read_text(encoding="utf-8")
+
+    if not logs_text:
+        job = db.query(BuildJobDB).filter(BuildJobDB.id == job_id).first()
+        if job and job.log_file and Path(job.log_file).exists():
+            logs_text = Path(job.log_file).read_text(encoding="utf-8")
+
+    if logs_text:
+        return {"job_id": job_id, "logs": logs_text}
     
-    log_file = Path(job.log_file) if job.log_file else None
-    if log_file and log_file.exists():
-        return {"job_id": job_id, "logs": log_file.read_text(encoding="utf-8")}
-    return {"job_id": job_id, "logs": "Log file not found."}
+    return {"job_id": job_id, "logs": "No logs recorded for this image."}
 
 @app.post("/api/build")
 @app.post("/api/jobs/build")
@@ -579,7 +612,7 @@ def serve_spa(full_path: str):
         raise HTTPException(status_code=404, detail="Not Found")
     
     if full_path:
-        # Check logo image requests
+        # Check logo image & chime audio requests
         if full_path in ["logo.png", "public/logo.png", "frontend/public/logo.png", "assets/logo.png"]:
             logo_candidates = [
                 dist_dir / "logo.png",
@@ -593,6 +626,22 @@ def serve_spa(full_path: str):
                 Path("logo.png")
             ]
             for candidate in logo_candidates:
+                if candidate.is_file():
+                    return FileResponse(candidate)
+
+        if full_path in ["chime.wav", "public/chime.wav", "frontend/public/chime.wav", "assets/chime.wav"]:
+            chime_candidates = [
+                dist_dir / "chime.wav",
+                dist_dir / "frontend/public/chime.wav",
+                dist_dir / "public/chime.wav",
+                dist_dir / "assets/chime.wav",
+                frontend_dir / "public/chime.wav",
+                frontend_dir / "chime.wav",
+                Path("frontend/public/chime.wav"),
+                Path("public/chime.wav"),
+                Path("chime.wav")
+            ]
+            for candidate in chime_candidates:
                 if candidate.is_file():
                     return FileResponse(candidate)
 

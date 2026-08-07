@@ -2,6 +2,7 @@ import os
 import asyncio
 import uuid
 import datetime
+import json
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Any, Optional, Callable
 from fastapi import WebSocket
@@ -10,9 +11,49 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 LOGS_DIR = DATA_DIR / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 WORKSPACE_DIR = DATA_DIR / "workspace"
+HISTORY_FILE = DATA_DIR / "image_history.json"
 
 class DockerService:
     is_building = False
+
+    @staticmethod
+    def load_image_history() -> Dict[str, Any]:
+        if HISTORY_FILE.exists():
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    @staticmethod
+    def save_image_history(history: Dict[str, Any]) -> None:
+        try:
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            print(f"Error saving image history: {e}")
+
+    @staticmethod
+    async def get_image_created_timestamp(image_tag_or_id: str) -> str:
+        docker_sock = Path("/var/run/docker.sock")
+        if docker_sock.exists():
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    f'docker image inspect --format "{{{{.Created}}}}" "{image_tag_or_id}"',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0:
+                    raw_ts = stdout.decode().strip()
+                    if raw_ts:
+                        clean_ts = raw_ts.split(".")[0].replace("Z", "")
+                        dt = datetime.datetime.fromisoformat(clean_ts).replace(tzinfo=datetime.timezone.utc).astimezone()
+                        return dt.strftime("%d/%m/%Y, %I:%M %p")
+            except Exception:
+                pass
+        return datetime.datetime.now().strftime("%d/%m/%Y, %I:%M %p")
 
     @staticmethod
     def get_full_image_tag(image_name: str, tag: str, dockerhub_username: Optional[str] = None) -> str:
@@ -45,12 +86,12 @@ class DockerService:
             raise RuntimeError("Another build or push job is currently running.")
 
         DockerService.is_building = True
-        log_file_path = LOGS_DIR / f"{job_id}.log"
+        temp_log_file = LOGS_DIR / f"{job_id}.log"
         full_image_tag = DockerService.get_full_image_tag(image_name, tag, dockerhub_username)
 
         async def emit(line: str):
             formatted_line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {line}\n"
-            with open(log_file_path, "a", encoding="utf-8") as f:
+            with open(temp_log_file, "a", encoding="utf-8") as f:
                 f.write(formatted_line)
             if log_callback:
                 await log_callback(formatted_line)
@@ -101,6 +142,25 @@ class DockerService:
                 await proc.wait()
                 if proc.returncode != 0:
                     await emit("❌ Docker build failed with non-zero exit status.")
+
+                    # Build Failure Tracking
+                    fail_id = f"failed-{job_id[:8]}"
+                    build_log_name = f"{fail_id}_build.log"
+                    fail_log_file = LOGS_DIR / build_log_name
+                    if temp_log_file.exists():
+                        fail_log_file.write_text(temp_log_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+                    history = DockerService.load_image_history()
+                    history[fail_id] = {
+                        "image_id": fail_id,
+                        "target_tag": full_image_tag,
+                        "created": datetime.datetime.now().strftime("%d/%m/%Y, %I:%M %p"),
+                        "build_status": "FAILED",
+                        "push_status": None,
+                        "build_log": build_log_name,
+                        "push_log": None
+                    }
+                    DockerService.save_image_history(history)
                     return False
 
                 await emit("✅ Docker image compiled successfully!")
@@ -115,10 +175,15 @@ class DockerService:
                     )
                     stdout_new_id, _ = await proc_new_id.communicate()
                     if proc_new_id.returncode == 0:
-                        new_image_id = stdout_new_id.decode().strip()
-                        await emit(f"🆔 New Image ID: {new_image_id[:12]}")
+                        raw_id = stdout_new_id.decode().strip()
+                        clean_id = raw_id.replace("sha256:", "")[:12]
+                        new_image_id = clean_id
+                        await emit(f"🆔 New Image ID: {new_image_id}")
                 except Exception:
                     pass
+
+                if not new_image_id:
+                    new_image_id = uuid.uuid4().hex[:12]
 
                 # --- STEP 4: TARGETED AUTO-PRUNE PREVIOUS BUILD IMAGE ---
                 if auto_prune and old_image_id and new_image_id and old_image_id != new_image_id:
@@ -161,7 +226,8 @@ class DockerService:
                 await asyncio.sleep(0.5)
                 await emit("Step 6/6 : EXPOSE 8000")
                 await emit(f" ---> Successfully built image: {full_image_tag}")
-                await emit("🆔 New Image ID: sha256:78e10fa1b931a")
+                new_image_id = "78ea8396b0c2"
+                await emit(f"🆔 New Image ID: {new_image_id}")
 
                 if auto_prune:
                     await emit(f"🧹 Executing scoped project build cleanup for {full_image_tag}...")
@@ -173,10 +239,47 @@ class DockerService:
             await emit("==================================================")
             await emit(f"✨ DOCKER BUILD FINISHED SUCCESSFULLY [{full_image_tag}] ✨")
             await emit("==================================================")
+
+            # Success Tracking in image_history.json
+            created_ts = await DockerService.get_image_created_timestamp(full_image_tag)
+            build_log_name = f"{new_image_id}_build.log"
+            build_log_file = LOGS_DIR / build_log_name
+            if temp_log_file.exists():
+                build_log_file.write_text(temp_log_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+            history = DockerService.load_image_history()
+            existing = history.get(new_image_id, {})
+            history[new_image_id] = {
+                "image_id": new_image_id,
+                "target_tag": full_image_tag,
+                "created": created_ts,
+                "build_status": "SUCCESS",
+                "push_status": existing.get("push_status", None),
+                "build_log": build_log_name,
+                "push_log": existing.get("push_log", None)
+            }
+            DockerService.save_image_history(history)
             return True
 
         except Exception as e:
             await emit(f"💥 Build job exception: {str(e)}")
+            fail_id = f"failed-{job_id[:8]}"
+            build_log_name = f"{fail_id}_build.log"
+            fail_log_file = LOGS_DIR / build_log_name
+            if temp_log_file.exists():
+                fail_log_file.write_text(temp_log_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+            history = DockerService.load_image_history()
+            history[fail_id] = {
+                "image_id": fail_id,
+                "target_tag": full_image_tag,
+                "created": datetime.datetime.now().strftime("%d/%m/%Y, %I:%M %p"),
+                "build_status": "FAILED",
+                "push_status": None,
+                "build_log": build_log_name,
+                "push_log": None
+            }
+            DockerService.save_image_history(history)
             return False
         finally:
             DockerService.is_building = False
@@ -195,12 +298,59 @@ class DockerService:
             raise RuntimeError("Another build or push job is currently running.")
 
         DockerService.is_building = True
-        log_file_path = LOGS_DIR / f"{job_id}.log"
+        temp_log_file = LOGS_DIR / f"{job_id}.log"
         full_image_tag = DockerService.get_full_image_tag(image_name, tag, dockerhub_username)
+
+        # Identify image_id
+        history = DockerService.load_image_history()
+        target_image_id = None
+
+        # Check local inspect
+        docker_sock = Path("/var/run/docker.sock")
+        has_docker_socket = docker_sock.exists()
+        if has_docker_socket:
+            try:
+                proc_id = await asyncio.create_subprocess_shell(
+                    f'docker image inspect --format "{{{{.Id}}}}" "{full_image_tag}"',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                stdout_id, _ = await proc_id.communicate()
+                if proc_id.returncode == 0:
+                    target_image_id = stdout_id.decode().strip().replace("sha256:", "")[:12]
+            except Exception:
+                pass
+
+        if not target_image_id:
+            # Search history by target_tag
+            for key, val in history.items():
+                if val.get("target_tag") == full_image_tag and val.get("build_status") == "SUCCESS":
+                    target_image_id = key
+                    break
+
+        if not target_image_id:
+            target_image_id = "78ea8396b0c2" if not has_docker_socket else f"img-{job_id[:8]}"
+
+        push_log_name = f"{target_image_id}_push.log"
+
+        # Update push_status to PUSHING
+        if target_image_id in history:
+            history[target_image_id]["push_status"] = "PUSHING"
+        else:
+            history[target_image_id] = {
+                "image_id": target_image_id,
+                "target_tag": full_image_tag,
+                "created": datetime.datetime.now().strftime("%d/%m/%Y, %I:%M %p"),
+                "build_status": "SUCCESS",
+                "push_status": "PUSHING",
+                "build_log": f"{target_image_id}_build.log",
+                "push_log": None
+            }
+        DockerService.save_image_history(history)
 
         async def emit(line: str):
             formatted_line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {line}\n"
-            with open(log_file_path, "a", encoding="utf-8") as f:
+            with open(temp_log_file, "a", encoding="utf-8") as f:
                 f.write(formatted_line)
             if log_callback:
                 await log_callback(formatted_line)
@@ -210,9 +360,6 @@ class DockerService:
             await emit(f"🚀 Starting DockForge Image Push Job: {job_id}")
             await emit(f"📦 Target Image: {full_image_tag}")
             await emit("==================================================")
-
-            docker_sock = Path("/var/run/docker.sock")
-            has_docker_socket = docker_sock.exists()
 
             if has_docker_socket:
                 if dockerhub_username and dockerhub_token:
@@ -265,6 +412,17 @@ class DockerService:
                 await proc_push.wait()
                 if proc_push.returncode != 0:
                     await emit("❌ Docker push failed.")
+
+                    # Save push log and set status to FAILED
+                    push_log_file = LOGS_DIR / push_log_name
+                    if temp_log_file.exists():
+                        push_log_file.write_text(temp_log_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+                    history = DockerService.load_image_history()
+                    if target_image_id in history:
+                        history[target_image_id]["push_status"] = "FAILED"
+                        history[target_image_id]["push_log"] = push_log_name
+                        DockerService.save_image_history(history)
                     return False
 
                 await emit(f"🎉 Successfully pushed {full_image_tag} to Docker Hub!")
@@ -284,10 +442,30 @@ class DockerService:
             await emit("==================================================")
             await emit(f"✨ DOCKER PUSH FINISHED SUCCESSFULLY [{full_image_tag}] ✨")
             await emit("==================================================")
+
+            # Save push log and update push_status to PUSHED
+            push_log_file = LOGS_DIR / push_log_name
+            if temp_log_file.exists():
+                push_log_file.write_text(temp_log_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+            history = DockerService.load_image_history()
+            if target_image_id in history:
+                history[target_image_id]["push_status"] = "PUSHED"
+                history[target_image_id]["push_log"] = push_log_name
+                DockerService.save_image_history(history)
             return True
 
         except Exception as e:
             await emit(f"💥 Push job exception: {str(e)}")
+            push_log_file = LOGS_DIR / push_log_name
+            if temp_log_file.exists():
+                push_log_file.write_text(temp_log_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+            history = DockerService.load_image_history()
+            if target_image_id in history:
+                history[target_image_id]["push_status"] = "FAILED"
+                history[target_image_id]["push_log"] = push_log_name
+                DockerService.save_image_history(history)
             return False
         finally:
             DockerService.is_building = False

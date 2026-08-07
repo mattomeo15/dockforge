@@ -628,6 +628,24 @@ import '../css/styles.css';
     render();
   }
 
+  // --- AUDIO NOTIFICATIONS ---
+  function playChimeSound() {
+    try {
+      const audio = new Audio('/chime.wav');
+      audio.volume = 0.8;
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          const fallbackAudio = new Audio('/frontend/public/chime.wav');
+          fallbackAudio.volume = 0.8;
+          fallbackAudio.play().catch(() => {});
+        });
+      }
+    } catch (e) {
+      console.warn('Audio playback error:', e);
+    }
+  }
+
   // --- WEBSOCKET LOG STREAMING ---
   function connectWebSocket(jobId) {
     if (state.currentWs) {
@@ -673,8 +691,10 @@ import '../css/styles.css';
         state.dockerTagInput = parsed.tag;
         safeLocalStorageSet('dockforge_last_build', JSON.stringify(state.lastLocalBuild));
         showToast(`Docker image build completed (${parsed.repo}:${parsed.tag})!`);
+        playChimeSound();
       } else if (state.activeJobLogs.includes('DOCKER PUSH FINISHED SUCCESSFULLY') || state.activeJobLogs.includes('Successfully pushed')) {
         showToast('Docker image push completed successfully!');
+        playChimeSound();
       }
       loadJobs();
       render();
@@ -901,12 +921,12 @@ import '../css/styles.css';
             <div class="flex items-center space-x-1 p-1 mr-[5px] rounded-lg bg-slate-50/60 dark:bg-slate-800/40 border border-purple-200/80 dark:border-slate-700/50 shadow-2xs">
               <button id="btn-pull" class="h-8 px-2.5 text-xs font-semibold bg-purple-600 hover:bg-purple-500 text-white rounded-md shadow-2xs flex items-center space-x-1.5 transition border border-purple-500/30 cursor-pointer" title="Git Pull Repository">
                 <i class="fa-solid fa-code-branch text-purple-100 text-[14px] mr-0"></i>
-                <span>Git Pull</span>
+                <span class="ml-1">Git Pull</span>
               </button>
 
               <button id="btn-push" class="h-8 px-2.5 text-xs font-semibold bg-purple-700 hover:bg-purple-600 text-white rounded-md shadow-2xs flex items-center space-x-1.5 transition border border-purple-600/30 cursor-pointer" title="Git Push / Commit Changes">
                 <i class="fa-solid fa-code-commit text-purple-100 text-[14px] mr-0"></i>
-                <span>Git Push</span>
+                <span class="ml-1">Git Push</span>
               </button>
 
               <!-- GitHub External Link Button -->
@@ -924,12 +944,12 @@ import '../css/styles.css';
             <div class="flex items-center space-x-1 p-1 ml-[5px] rounded-lg bg-slate-50/60 dark:bg-slate-800/40 border border-blue-200/80 dark:border-slate-700/50 shadow-2xs">
               <button id="btn-build-image" class="h-8 px-2.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded-md shadow-2xs flex items-center space-x-1.5 transition border border-blue-500/30 cursor-pointer" title="Build Docker Container Image">
                 <i class="fa-solid fa-layer-group text-blue-100 text-[15px] mr-0"></i>
-                <span>Image Build</span>
+                <span class="ml-1">Image Build</span>
               </button>
 
               <button id="btn-push-docker" ${isBuildReadyForCurrentProject() ? '' : 'disabled'} class="h-8 px-2.5 text-xs font-semibold ${isBuildReadyForCurrentProject() ? 'bg-blue-700 hover:bg-blue-600 text-white shadow-2xs border border-blue-600/30 cursor-pointer' : 'bg-slate-100 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border border-slate-200 dark:border-slate-800 opacity-50 cursor-not-allowed pointer-events-none'} rounded-md flex items-center space-x-1.5 transition" title="${isBuildReadyForCurrentProject() ? 'Push Docker Image to Registry' : 'Please build the image for this project before pushing to Docker Hub'}">
                 <i class="fa-solid fa-rocket ${isBuildReadyForCurrentProject() ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'} text-[15px] mr-0"></i>
-                <span>Image Push</span>
+                <span class="ml-1">Image Push</span>
               </button>
 
               <!-- DockerHub External Link Button -->
@@ -948,7 +968,7 @@ import '../css/styles.css';
               <!-- Logs Button -->
               <button id="btn-jobs" class="h-8 px-2.5 text-xs font-semibold bg-[#F1F5F9] hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300/80 flex items-center space-x-1.5 transition shadow-2xs cursor-pointer" title="Build & Push Logs">
                 <i class="fa-solid fa-list-check text-purple-700 text-[15px] mr-0"></i>
-                <span>Logs</span>
+                <span class="ml-1">Logs</span>
               </button>
 
               <!-- Settings Button (Icon-Only with upgraded mechanical cogwheel SVG) -->
@@ -2122,14 +2142,41 @@ import '../css/styles.css';
     `;
   }
 
+  function getBuildStatusPill(status) {
+    const s = String(status || '').toUpperCase();
+    if (s === 'SUCCESS' || s === 'SUCCESSFUL') {
+      return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">SUCCESS</span>`;
+    } else if (s === 'FAILED' || s === 'FAILURE') {
+      return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-red-500/10 text-red-500 border border-red-500/20">FAILED</span>`;
+    } else if (s === 'BUILDING') {
+      return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-blue-500/10 text-blue-500 border border-blue-500/20 animate-pulse">BUILDING</span>`;
+    }
+    return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-slate-500/10 text-slate-500 border border-slate-500/20">QUEUED</span>`;
+  }
+
+  function getPushStatusPill(status) {
+    if (!status) {
+      return `<span class="text-slate-400 dark:text-slate-500 font-mono">-</span>`;
+    }
+    const s = String(status).toUpperCase();
+    if (s === 'PUSHED') {
+      return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">PUSHED</span>`;
+    } else if (s === 'PUSHING') {
+      return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20 animate-pulse">PUSHING...</span>`;
+    } else if (s === 'FAILED') {
+      return `<span class="px-2 py-0.5 text-[10px] uppercase font-bold rounded-full bg-red-500/10 text-red-500 border border-red-500/20">FAILED</span>`;
+    }
+    return `<span class="text-slate-400 dark:text-slate-500 font-mono">-</span>`;
+  }
+
   function renderJobsModal() {
     return `
       <div class="fixed inset-0 z-50 flex items-center justify-center dark:bg-slate-950/80 bg-slate-900/50 backdrop-blur-sm p-4">
-        <div class="w-full max-w-4xl dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
+        <div class="w-full max-w-5xl dark:bg-slate-900 bg-white border dark:border-slate-800 border-slate-200 rounded-xl p-6 shadow-2xl dark:text-slate-100 text-slate-800">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
-              <i class="fa-solid fa-list-check text-purple-500"></i>
-              <span>Build Job History</span>
+              <i class="fa-solid fa-boxes-stacked text-purple-500"></i>
+              <span>Image Repository & Build History</span>
             </h3>
             <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
           </div>
@@ -2137,33 +2184,45 @@ import '../css/styles.css';
             <table class="w-full text-left border-collapse text-xs">
               <thead>
                 <tr class="border-b dark:border-slate-800 border-slate-200 dark:text-slate-400 text-slate-500 uppercase tracking-wider">
-                  <th class="py-2.5 px-3">Job ID</th>
-                  <th class="py-2.5 px-3 w-28">Type</th>
-                  <th class="py-2.5 px-3">Image / Target</th>
-                  <th class="py-2.5 px-3 font-mono">Image ID</th>
-                  <th class="py-2.5 px-3">Status</th>
-                  <th class="py-2.5 px-3">Completed</th>
-                  <th class="py-2.5 px-3 text-right">Actions</th>
+                  <th class="py-2.5 px-3">IMAGE / TARGET</th>
+                  <th class="py-2.5 px-3 font-mono">IMAGE ID</th>
+                  <th class="py-2.5 px-3">BUILD</th>
+                  <th class="py-2.5 px-3">PUSH</th>
+                  <th class="py-2.5 px-3">CREATED</th>
+                  <th class="py-2.5 px-3 text-right">ACTIONS</th>
                 </tr>
               </thead>
               <tbody class="divide-y dark:divide-slate-800/50 divide-slate-200">
-                ${state.jobs.length === 0 ? `<tr><td colspan="7" class="py-4 text-center dark:text-slate-500 text-slate-400">No build jobs recorded yet.</td></tr>` : ''}
+                ${state.jobs.length === 0 ? `<tr><td colspan="6" class="py-4 text-center dark:text-slate-500 text-slate-400">No container images recorded yet.</td></tr>` : ''}
                 ${state.jobs.map(j => {
-                  const rawImgId = j.image_id || j.commit_sha || '';
-                  const displayImgId = rawImgId ? rawImgId.substring(0, 12) : '-';
-                  const completedTime = j.completed_at || j.ended_at || j.finished_at;
+                  const targetTag = j.target_tag || `${j.image_name || 'dockforge'}:${j.tag || 'latest'}`;
+                  const imgId = j.image_id || j.id || '-';
+                  const displayImgId = imgId.length > 12 ? imgId.substring(0, 12) : imgId;
+                  const buildStatus = j.build_status || (j.status === 'success' ? 'SUCCESS' : j.status === 'failure' ? 'FAILED' : 'SUCCESS');
+                  const pushStatus = j.push_status || null;
+                  const createdTime = j.created || j.completed_at || j.started_at || '-';
+                  const isBuildSuccess = buildStatus === 'SUCCESS';
+
                   return `
                     <tr class="dark:hover:bg-slate-800/50 hover:bg-slate-100">
-                      <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600" title="${escapeHtml(j.id)}">${escapeHtml((j.id || '').substring(0, 8))}</td>
-                      <td class="py-2.5 px-3 w-28">${getJobTypeBadge(j.job_type || j.action)}</td>
-                      <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900">${escapeHtml(j.image_name)}:${escapeHtml(j.tag)}</td>
-                      <td class="py-2.5 px-3 font-mono dark:text-slate-400 text-slate-500" title="${escapeHtml(rawImgId || '-')}">${escapeHtml(displayImgId)}</td>
-                      <td class="py-2.5 px-3">${getStatusPill(j.status)}</td>
-                      <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500 whitespace-nowrap">${formatCompletedTime(completedTime, j.status)}</td>
-                      <td class="py-2.5 px-3 text-right">
-                        <button class="btn-view-job-logs px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded" data-job-id="${j.id}">
+                      <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900 select-all">${escapeHtml(targetTag)}</td>
+                      <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600 select-all" title="${escapeHtml(imgId)}">${escapeHtml(displayImgId)}</td>
+                      <td class="py-2.5 px-3">${getBuildStatusPill(buildStatus)}</td>
+                      <td class="py-2.5 px-3">${getPushStatusPill(pushStatus)}</td>
+                      <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500 whitespace-nowrap">${escapeHtml(createdTime)}</td>
+                      <td class="py-2.5 px-3 text-right space-x-1.5">
+                        <button class="btn-view-job-logs px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded transition" data-job-id="${escapeHtml(imgId)}">
                           View Log
                         </button>
+                        ${isBuildSuccess ? `
+                          <button class="btn-push-history-image px-2.5 py-1 text-xs bg-amber-600 hover:bg-amber-500 text-white rounded shadow-sm transition" data-target-tag="${escapeHtml(targetTag)}" data-image-id="${escapeHtml(imgId)}">
+                            <i class="fa-solid fa-cloud-arrow-up mr-1"></i>Push
+                          </button>
+                        ` : `
+                          <button disabled class="px-2.5 py-1 text-xs dark:bg-slate-800/50 bg-slate-100 dark:text-slate-600 text-slate-400 rounded cursor-not-allowed">
+                            Push
+                          </button>
+                        `}
                       </td>
                     </tr>
                   `;
@@ -3636,6 +3695,29 @@ import '../css/styles.css';
           }
         } catch (e) {
           alert(`Error fetching logs: ${e.message}`);
+        }
+      });
+    });
+
+    document.querySelectorAll('.btn-push-history-image').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const targetTag = btn.getAttribute('data-target-tag');
+        if (targetTag) {
+          let imageName = targetTag;
+          let tag = 'latest';
+          if (targetTag.includes(':')) {
+            const parts = targetTag.split(':');
+            imageName = parts[0];
+            tag = parts[1];
+          }
+          state.dockerImageInput = imageName;
+          state.dockerTagInput = tag;
+          state.modals.jobs = false;
+          state.modals.pushDocker = true;
+          if (state.dockerHubRepos.length === 0) {
+            loadDockerHubRepos();
+          }
+          render();
         }
       });
     });
