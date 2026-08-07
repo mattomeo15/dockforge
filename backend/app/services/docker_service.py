@@ -35,25 +35,12 @@ class DockerService:
             print(f"Error saving image history: {e}")
 
     @staticmethod
+    def get_current_local_timestamp() -> str:
+        return datetime.datetime.now().astimezone().strftime("%d/%m/%Y, %I:%M %p")
+
+    @staticmethod
     async def get_image_created_timestamp(image_tag_or_id: str) -> str:
-        docker_sock = Path("/var/run/docker.sock")
-        if docker_sock.exists():
-            try:
-                proc = await asyncio.create_subprocess_shell(
-                    f'docker image inspect --format "{{{{.Created}}}}" "{image_tag_or_id}"',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL
-                )
-                stdout, _ = await proc.communicate()
-                if proc.returncode == 0:
-                    raw_ts = stdout.decode().strip()
-                    if raw_ts:
-                        clean_ts = raw_ts.split(".")[0].replace("Z", "")
-                        dt = datetime.datetime.fromisoformat(clean_ts).replace(tzinfo=datetime.timezone.utc).astimezone()
-                        return dt.strftime("%d/%m/%Y, %I:%M %p")
-            except Exception:
-                pass
-        return datetime.datetime.now().strftime("%d/%m/%Y, %I:%M %p")
+        return datetime.datetime.now().astimezone().strftime("%d/%m/%Y, %I:%M %p")
 
     @staticmethod
     def get_full_image_tag(image_name: str, tag: str, dockerhub_username: Optional[str] = None) -> str:

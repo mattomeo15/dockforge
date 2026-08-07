@@ -1,9 +1,13 @@
+import os
+import zipfile
 import uuid
 import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, File, UploadFile, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+import io
+import tarfile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -233,14 +237,19 @@ def get_file_tree(current_user: UserDB = Depends(get_current_user)):
     return GitService.get_file_tree()
 
 @app.get("/api/workspace/file")
-def read_file(path: str, raw: bool = False, current_user: UserDB = Depends(get_current_user)):
+@app.get("/api/workspace/files/raw/{file_path:path}")
+def read_file(path: Optional[str] = None, file_path: Optional[str] = None, raw: bool = False, current_user: UserDB = Depends(get_current_user)):
+    target_path = file_path or path
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Path parameter required")
+    is_raw_endpoint = file_path is not None or raw
     try:
-        res = GitService.read_file(path, raw=raw)
-        if raw and isinstance(res, dict) and "file_path" in res:
+        res = GitService.read_file(target_path, raw=is_raw_endpoint)
+        if is_raw_endpoint and isinstance(res, dict) and "file_path" in res:
             return FileResponse(res["file_path"], media_type=res.get("mime_type"))
         if isinstance(res, dict):
             return res
-        return {"path": path, "content": res}
+        return {"path": target_path, "content": res}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -291,12 +300,83 @@ async def upload_workspace_files(
 
 @app.delete("/api/files/delete")
 @app.delete("/api/workspace/file")
+@app.delete("/api/workspace/item")
+@app.delete("/api/workspace/items")
 def delete_file_route(path: str, current_user: UserDB = Depends(get_current_user)):
     try:
         GitService.delete_path(path)
         return {"status": "success", "message": f"Deleted {path}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/workspace/rename")
+def rename_file_route(payload: Dict[str, Any], current_user: UserDB = Depends(get_current_user)):
+    try:
+        old_path = payload.get("old_path") or payload.get("src") or payload.get("oldPath")
+        new_path = payload.get("new_path") or payload.get("dest") or payload.get("newPath")
+        if not old_path or not new_path:
+            raise HTTPException(status_code=400, detail="Both old_path and new_path parameters are required")
+        GitService.move_path(old_path, new_path)
+        return {"status": "success", "message": f"Renamed {old_path} to {new_path}", "old_path": old_path, "new_path": new_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/workspace/copy-paste")
+def copy_paste_route(payload: Dict[str, Any], current_user: UserDB = Depends(get_current_user)):
+    try:
+        src_path = payload.get("src_path") or payload.get("src") or payload.get("path")
+        dest_dir = payload.get("dest_dir") or payload.get("dest") or payload.get("target_dir") or ""
+        if not src_path:
+            raise HTTPException(status_code=400, detail="src_path parameter is required")
+        new_path = GitService.copy_paste(src_path, dest_dir)
+        return {"status": "success", "message": f"Copied {src_path} to {new_path}", "new_path": new_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/workspace/download-zip")
+@app.get("/api/workspace/export-zip")
+async def download_workspace_zip_endpoint(current_user: UserDB = Depends(get_current_user)):
+    if not GitService.WORKSPACE_DIR.exists():
+        raise HTTPException(status_code=404, detail="Workspace directory not found")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for root, dirs, files in os.walk(GitService.WORKSPACE_DIR):
+            for file in files:
+                file_path = Path(root) / file
+                if ".git" in file_path.parts or ".dockforge" in file_path.parts:
+                    continue
+                arcname = file_path.relative_to(GitService.WORKSPACE_DIR)
+                zip_file.write(file_path, arcname)
+
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=workspace.zip"}
+    )
+
+@app.get("/api/workspace/download-folder")
+async def download_workspace_folder_endpoint(path: str, current_user: UserDB = Depends(get_current_user)):
+    target_folder = (GitService.WORKSPACE_DIR / path).resolve()
+    if not target_folder.is_relative_to(GitService.WORKSPACE_DIR.resolve()) or not target_folder.exists() or not target_folder.is_dir():
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for root, dirs, files in os.walk(target_folder):
+            for file in files:
+                file_path = Path(root) / file
+                arcname = file_path.relative_to(target_folder.parent)
+                zip_file.write(file_path, arcname)
+
+    zip_buffer.seek(0)
+    folder_name = target_folder.name
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{folder_name}.zip"'}
+    )
 
 @app.get("/api/workspace/order")
 def get_workspace_order(current_user: UserDB = Depends(get_current_user)):
@@ -428,7 +508,7 @@ def list_build_history(db: Session = Depends(get_db), current_user: UserDB = Dep
 
 @app.get("/api/jobs/{job_id}/logs")
 @app.get("/api/history/{job_id}/logs")
-def get_job_logs(job_id: str, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
+def get_job_logs(job_id: str, type: Optional[str] = None, db: Session = Depends(get_db), current_user: UserDB = Depends(get_current_user)):
     history = DockerService.load_image_history()
     item = history.get(job_id)
     if not item:
@@ -439,13 +519,32 @@ def get_job_logs(job_id: str, db: Session = Depends(get_db), current_user: UserD
 
     logs_text = ""
     if item:
-        build_log_path = LOGS_DIR / item["build_log"] if item.get("build_log") else None
-        push_log_path = LOGS_DIR / item["push_log"] if item.get("push_log") else None
-        
-        if build_log_path and build_log_path.exists():
-            logs_text += f"=== BUILD LOG [{item.get('image_id')}] ===\n" + build_log_path.read_text(encoding="utf-8") + "\n"
-        if push_log_path and push_log_path.exists():
-            logs_text += f"\n=== PUSH LOG [{item.get('image_id')}] ===\n" + push_log_path.read_text(encoding="utf-8") + "\n"
+        if type == "build" and item.get("build_log"):
+            p = LOGS_DIR / item["build_log"]
+            if p.exists():
+                logs_text = f"=== BUILD LOG [{item.get('image_id')}] ===\n" + p.read_text(encoding="utf-8")
+        elif type == "push" and item.get("push_log"):
+            p = LOGS_DIR / item["push_log"]
+            if p.exists():
+                logs_text = f"=== PUSH LOG [{item.get('image_id')}] ===\n" + p.read_text(encoding="utf-8")
+        else:
+            build_log_path = LOGS_DIR / item["build_log"] if item.get("build_log") else None
+            push_log_path = LOGS_DIR / item["push_log"] if item.get("push_log") else None
+            
+            if build_log_path and build_log_path.exists():
+                logs_text += f"=== BUILD LOG [{item.get('image_id')}] ===\n" + build_log_path.read_text(encoding="utf-8") + "\n"
+            if push_log_path and push_log_path.exists():
+                logs_text += f"\n=== PUSH LOG [{item.get('image_id')}] ===\n" + push_log_path.read_text(encoding="utf-8") + "\n"
+
+    if not logs_text and type == "build":
+        p = LOGS_DIR / f"{job_id}_build.log"
+        if p.exists():
+            logs_text = f"=== BUILD LOG [{job_id}] ===\n" + p.read_text(encoding="utf-8")
+
+    if not logs_text and type == "push":
+        p = LOGS_DIR / f"{job_id}_push.log"
+        if p.exists():
+            logs_text = f"=== PUSH LOG [{job_id}] ===\n" + p.read_text(encoding="utf-8")
 
     if not logs_text:
         candidate_files = list(LOGS_DIR.glob(f"*{job_id}*"))
@@ -460,7 +559,51 @@ def get_job_logs(job_id: str, db: Session = Depends(get_db), current_user: UserD
     if logs_text:
         return {"job_id": job_id, "logs": logs_text}
     
-    return {"job_id": job_id, "logs": "No logs recorded for this image."}
+    return {"job_id": job_id, "logs": f"No {type or ''} logs recorded for this image."}
+
+@app.get("/api/images/download/{image_id}")
+async def download_image(image_id: str, current_user: UserDB = Depends(get_current_user)):
+    history = DockerService.load_image_history()
+    entry = history.get(image_id)
+    if not entry:
+        for k, v in history.items():
+            if k == image_id or v.get("image_id") == image_id or v.get("target_tag") == image_id:
+                entry = v
+                break
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    target_tag = entry.get("target_tag", "dockforge:latest")
+    filename = f"{image_id}.tar"
+
+    docker_sock = Path("/var/run/docker.sock")
+    if docker_sock.exists():
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "save", target_tag,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        return StreamingResponse(
+            proc.stdout,
+            media_type="application/x-tar",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    else:
+        # Sandbox mode - stream tar archive
+        tar_stream = io.BytesIO()
+        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+            manifest_content = json.dumps([{"RepoTags": [target_tag], "Layers": []}]).encode("utf-8")
+            tarinfo = tarfile.TarInfo(name="manifest.json")
+            tarinfo.size = len(manifest_content)
+            tar.addfile(tarinfo, io.BytesIO(manifest_content))
+        tar_stream.seek(0)
+        return StreamingResponse(
+            tar_stream,
+            media_type="application/x-tar",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
 
 @app.post("/api/build")
 @app.post("/api/jobs/build")

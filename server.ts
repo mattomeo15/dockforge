@@ -547,6 +547,17 @@ async function startServer() {
       ".ico": "image/x-icon",
     };
 
+    const audioMimes: Record<string, string> = {
+      ".mp3": "audio/mpeg",
+      ".wav": "audio/wav",
+      ".ogg": "audio/ogg",
+      ".m4a": "audio/mp4",
+      ".flac": "audio/flac",
+      ".aac": "audio/aac",
+      ".opus": "audio/opus",
+      ".webm": "audio/webm",
+    };
+
     if (imageMimes[ext]) {
       if (req.query.raw === "true") {
         res.setHeader("Content-Type", imageMimes[ext]);
@@ -565,8 +576,38 @@ async function startServer() {
       });
     }
 
+    if (audioMimes[ext]) {
+      if (req.query.raw === "true") {
+        res.setHeader("Content-Type", audioMimes[ext]);
+        return res.sendFile(safePath);
+      }
+      const buffer = fs.readFileSync(safePath);
+      const base64 = buffer.toString("base64");
+      const dataUrl = `data:${audioMimes[ext]};base64,${base64}`;
+      return res.json({
+        path: filePath,
+        content: dataUrl,
+        isAudio: true,
+        mimeType: audioMimes[ext],
+        format: ext.replace(".", "").toUpperCase(),
+        size: buffer.length,
+      });
+    }
+
     const content = fs.readFileSync(safePath, "utf-8");
-    res.json({ path: filePath, content, isImage: false });
+    res.json({ path: filePath, content, isImage: false, isAudio: false });
+  });
+
+  app.get("/api/workspace/files/raw/:filePath(*)", authenticateToken, (req, res) => {
+    const filePath = req.params.filePath;
+    if (!filePath) return res.status(400).json({ detail: "Path required" });
+
+    const safePath = path.join(WORKSPACE_DIR, path.normalize(filePath));
+    if (!safePath.startsWith(WORKSPACE_DIR) || !fs.existsSync(safePath)) {
+      return res.status(404).json({ detail: "File not found" });
+    }
+
+    return res.sendFile(safePath);
   });
 
   const createWorkspaceItem = (req: any, res: any) => {
@@ -630,7 +671,115 @@ async function startServer() {
   };
 
   app.delete("/api/workspace/file", authenticateToken, deleteWorkspaceItem);
+  app.delete("/api/workspace/item", authenticateToken, deleteWorkspaceItem);
+  app.delete("/api/workspace/items", authenticateToken, deleteWorkspaceItem);
   app.delete("/api/files/delete", authenticateToken, deleteWorkspaceItem);
+
+  const copyPasteWorkspaceItem = (req: any, res: any) => {
+    try {
+      const srcPath = (req.body?.src_path || req.body?.src || req.body?.path) as string;
+      const destDir = (req.body?.dest_dir || req.body?.dest || req.body?.target_dir || "") as string;
+
+      if (!srcPath) return res.status(400).json({ detail: "src_path parameter is required" });
+
+      const safeSrc = path.join(WORKSPACE_DIR, path.normalize(srcPath));
+      const safeDestDir = path.join(WORKSPACE_DIR, path.normalize(destDir));
+
+      if (!safeSrc.startsWith(WORKSPACE_DIR) || !safeDestDir.startsWith(WORKSPACE_DIR)) {
+        return res.status(400).json({ detail: "Invalid path outside workspace" });
+      }
+      if (!fs.existsSync(safeSrc)) {
+        return res.status(404).json({ detail: `Source item not found: ${srcPath}` });
+      }
+
+      fs.mkdirSync(safeDestDir, { recursive: true });
+
+      const srcName = path.basename(safeSrc);
+      let targetPath = path.join(safeDestDir, srcName);
+      if (fs.existsSync(targetPath)) {
+        const ext = path.extname(srcName);
+        const nameWithoutExt = path.basename(srcName, ext);
+        let counter = 1;
+        while (fs.existsSync(path.join(safeDestDir, `${nameWithoutExt}_copy${counter}${ext}`))) {
+          counter++;
+        }
+        targetPath = path.join(safeDestDir, `${nameWithoutExt}_copy${counter}${ext}`);
+      }
+
+      fs.cpSync(safeSrc, targetPath, { recursive: true });
+      const relNew = path.relative(WORKSPACE_DIR, targetPath).replace(/\\/g, "/");
+      console.log(`📋 Copied workspace item: ${srcPath} -> ${relNew}`);
+      return res.json({ status: "success", message: `Copied to ${relNew}`, new_path: relNew });
+    } catch (err: any) {
+      console.error(`❌ [FS ERROR] Copy paste failed:`, err?.message || err);
+      return res.status(500).json({ detail: `Copy paste failed: ${err?.message || err}` });
+    }
+  };
+
+  app.post("/api/workspace/copy-paste", authenticateToken, copyPasteWorkspaceItem);
+
+  const downloadWorkspaceZip = (req: any, res: any) => {
+    try {
+      if (!fs.existsSync(WORKSPACE_DIR)) {
+        return res.status(404).json({ detail: "Workspace not found" });
+      }
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", 'attachment; filename="workspace.zip"');
+      const zipProc = spawn("python3", [
+        "-c",
+        `
+import os, zipfile, sys, pathlib
+ws = pathlib.Path("${WORKSPACE_DIR}")
+with zipfile.ZipFile(sys.stdout.buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(ws):
+        for f in files:
+            p = pathlib.Path(root) / f
+            if ".git" in p.parts or ".dockforge" in p.parts:
+                continue
+            zf.write(p, p.relative_to(ws))
+`
+      ]);
+      zipProc.stdout.pipe(res);
+      zipProc.stderr.on("data", (d: any) => console.error(`[ZIP ERR] ${d}`));
+    } catch (err: any) {
+      return res.status(500).json({ detail: err.message || "Failed creating zip archive" });
+    }
+  };
+
+  app.get("/api/workspace/download-zip", authenticateToken, downloadWorkspaceZip);
+  app.get("/api/workspace/export-zip", authenticateToken, downloadWorkspaceZip);
+
+  const downloadFolderZip = (req: any, res: any) => {
+    try {
+      const folderPath = req.query.path as string;
+      if (!folderPath) return res.status(400).json({ detail: "Folder path required" });
+      const safeFolder = path.join(WORKSPACE_DIR, path.normalize(folderPath));
+      if (!safeFolder.startsWith(WORKSPACE_DIR) || !fs.existsSync(safeFolder) || !fs.statSync(safeFolder).isDirectory()) {
+        return res.status(404).json({ detail: "Folder not found" });
+      }
+      const folderName = path.basename(safeFolder);
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${folderName}.zip"`);
+      const zipProc = spawn("python3", [
+        "-c",
+        `
+import os, zipfile, sys, pathlib
+target = pathlib.Path("${safeFolder}")
+with zipfile.ZipFile(sys.stdout.buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(target):
+        for f in files:
+            p = pathlib.Path(root) / f
+            zf.write(p, p.relative_to(target.parent))
+`
+      ]);
+      zipProc.stdout.pipe(res);
+      zipProc.stderr.on("data", (d: any) => console.error(`[ZIP ERR] ${d}`));
+    } catch (err: any) {
+      return res.status(500).json({ detail: err.message || "Failed creating folder zip archive" });
+    }
+  };
+
+  app.get("/api/workspace/download-folder", authenticateToken, downloadFolderZip);
 
   const moveWorkspaceItem = (req: any, res: any) => {
     try {
@@ -688,6 +837,7 @@ async function startServer() {
 
   app.post("/api/files/move", authenticateToken, moveWorkspaceItem);
   app.post("/api/workspace/move", authenticateToken, moveWorkspaceItem);
+  app.post("/api/workspace/rename", authenticateToken, moveWorkspaceItem);
   app.patch("/api/workspace/move", authenticateToken, moveWorkspaceItem);
 
   const clearWorkspaceHandler = (req: any, res: any) => {
@@ -1056,6 +1206,7 @@ async function startServer() {
 
   app.get(["/api/jobs/:jobId/logs", "/api/history/:jobId/logs"], authenticateToken, (req, res) => {
     const { jobId } = req.params;
+    const type = (req.query.type as string) || null;
     const history = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
     let item = history[jobId];
     if (!item) {
@@ -1069,16 +1220,28 @@ async function startServer() {
 
     let logsText = "";
     if (item) {
-      if (item.build_log) {
+      if (type === "build" && item.build_log) {
         const buildPath = path.join(LOGS_DIR, item.build_log);
         if (fs.existsSync(buildPath)) {
-          logsText += `=== BUILD LOG [${item.image_id}] ===\n` + fs.readFileSync(buildPath, "utf-8") + "\n";
+          logsText = `=== BUILD LOG [${item.image_id}] ===\n` + fs.readFileSync(buildPath, "utf-8");
         }
-      }
-      if (item.push_log) {
+      } else if (type === "push" && item.push_log) {
         const pushPath = path.join(LOGS_DIR, item.push_log);
         if (fs.existsSync(pushPath)) {
-          logsText += `\n=== PUSH LOG [${item.image_id}] ===\n` + fs.readFileSync(pushPath, "utf-8") + "\n";
+          logsText = `=== PUSH LOG [${item.image_id}] ===\n` + fs.readFileSync(pushPath, "utf-8");
+        }
+      } else {
+        if (item.build_log) {
+          const buildPath = path.join(LOGS_DIR, item.build_log);
+          if (fs.existsSync(buildPath)) {
+            logsText += `=== BUILD LOG [${item.image_id}] ===\n` + fs.readFileSync(buildPath, "utf-8") + "\n";
+          }
+        }
+        if (item.push_log) {
+          const pushPath = path.join(LOGS_DIR, item.push_log);
+          if (fs.existsSync(pushPath)) {
+            logsText += `\n=== PUSH LOG [${item.image_id}] ===\n` + fs.readFileSync(pushPath, "utf-8") + "\n";
+          }
         }
       }
     }
@@ -1099,7 +1262,42 @@ async function startServer() {
     if (logsText) {
       return res.json({ job_id: jobId, logs: logsText });
     }
-    res.json({ job_id: jobId, logs: "No logs recorded for this image." });
+    res.json({ job_id: jobId, logs: `No ${type || ''} logs recorded for this image.` });
+  });
+
+  app.get("/api/images/download/:imageId", authenticateToken, (req, res) => {
+    const { imageId } = req.params;
+    const history = readJsonFile<Record<string, any>>(HISTORY_FILE, {});
+    let entry = history[imageId];
+    if (!entry) {
+      for (const k of Object.keys(history)) {
+        if (k === imageId || history[k].image_id === imageId || history[k].target_tag === imageId) {
+          entry = history[k];
+          break;
+        }
+      }
+    }
+
+    if (!entry) {
+      return res.status(404).json({ detail: "Image not found" });
+    }
+
+    const targetTag = entry.target_tag || "dockforge:latest";
+    const filename = `${imageId}.tar`;
+
+    res.setHeader("Content-Type", "application/x-tar");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    if (fs.existsSync("/var/run/docker.sock")) {
+      const { spawn } = require("child_process");
+      const proc = spawn("docker", ["save", targetTag]);
+      proc.stdout.pipe(res);
+      proc.stderr.on("data", (d: any) => console.error("docker save error:", d.toString()));
+    } else {
+      // Sandbox mode mock tar stream
+      const manifest = JSON.stringify([{ RepoTags: [targetTag], Layers: [] }]);
+      res.send(Buffer.from(manifest));
+    }
   });
 
   // Trigger Build Job (Build image only)

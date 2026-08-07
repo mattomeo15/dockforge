@@ -159,6 +159,16 @@ class GitService:
             ".ico": "image/x-icon",
             ".bmp": "image/bmp",
         }
+        audio_mimes = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".m4a": "audio/mp4",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+            ".opus": "audio/opus",
+            ".webm": "audio/webm",
+        }
 
         if ext in image_mimes:
             mime = image_mimes[ext]
@@ -179,6 +189,27 @@ class GitService:
                 }
             except Exception as err:
                 logger.error(f"Error reading image file {file_path}: {err}")
+                raise err
+
+        if ext in audio_mimes:
+            mime = audio_mimes[ext]
+            if raw:
+                return {"file_path": target_file, "mime_type": mime}
+
+            try:
+                raw_bytes = target_file.read_bytes()
+                b64_str = base64.b64encode(raw_bytes).decode("utf-8")
+                data_url = f"data:{mime};base64,{b64_str}"
+                return {
+                    "path": file_path,
+                    "content": data_url,
+                    "isAudio": True,
+                    "mimeType": mime,
+                    "format": ext.replace(".", "").upper(),
+                    "size": len(raw_bytes)
+                }
+            except Exception as err:
+                logger.error(f"Error reading audio file {file_path}: {err}")
                 raise err
 
         try:
@@ -275,6 +306,37 @@ class GitService:
 
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source), str(target))
+
+    @staticmethod
+    def copy_paste(src_path: str, dest_dir: str = "") -> str:
+        """Copy a file or directory into a destination directory."""
+        source = (WORKSPACE_DIR / src_path).resolve()
+        dest_folder = (WORKSPACE_DIR / dest_dir).resolve() if dest_dir else WORKSPACE_DIR.resolve()
+
+        if not source.is_relative_to(WORKSPACE_DIR.resolve()) or not dest_folder.is_relative_to(WORKSPACE_DIR.resolve()):
+            raise ValueError("Invalid file path outside workspace")
+        if not source.exists():
+            raise FileNotFoundError(f"Source item not found: {src_path}")
+
+        dest_folder.mkdir(parents=True, exist_ok=True)
+        
+        target_name = source.name
+        target = dest_folder / target_name
+        if target.exists():
+            stem = source.stem if source.is_file() else source.name
+            suffix = source.suffix if source.is_file() else ""
+            counter = 1
+            while (dest_folder / f"{stem}_copy{counter}{suffix}").exists():
+                counter += 1
+            target = dest_folder / f"{stem}_copy{counter}{suffix}"
+
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+
+        rel_new = str(target.relative_to(WORKSPACE_DIR)).replace("\\", "/")
+        return rel_new
 
     @staticmethod
     def push_to_github(commit_message: str, branch: str = "main", github_token: Optional[str] = None) -> Dict[str, Any]:

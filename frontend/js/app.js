@@ -92,6 +92,8 @@ import '../css/styles.css';
       clearWorkspace: false,
       deleteItem: null
     },
+    contextMenu: { visible: false, x: 0, y: 0, path: '', name: '', isFolder: false },
+    clipboard: null, // { srcPath: '', isFolder: false, name: '' }
     loading: {
       pull: false,
       push: false,
@@ -776,6 +778,7 @@ import '../css/styles.css';
         </div>
         ${renderMobileNav()}
         ${renderModals()}
+        ${renderContextMenu()}
       `;
 
       attachEvents();
@@ -965,10 +968,10 @@ import '../css/styles.css';
 
             <!-- Logs & Settings Actions Group -->
             <div class="flex items-center space-x-1 p-1 ml-[5px] rounded-lg bg-slate-50/60 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/50 shadow-2xs">
-              <!-- Logs Button -->
-              <button id="btn-jobs" class="h-8 px-2.5 text-xs font-semibold bg-[#F1F5F9] hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300/80 flex items-center space-x-1.5 transition shadow-2xs cursor-pointer" title="Build & Push Logs">
-                <i class="fa-solid fa-list-check text-purple-700 text-[15px] mr-0"></i>
-                <span class="ml-1">Logs</span>
+              <!-- Image History Button -->
+              <button id="btn-jobs" class="h-8 px-2.5 text-xs font-semibold bg-[#F1F5F9] hover:bg-slate-200 text-slate-800 rounded-md border border-slate-300/80 flex items-center space-x-1.5 transition shadow-2xs cursor-pointer" title="Image History">
+                <i class="fa-solid fa-clock-rotate-left text-purple-700 text-[15px] mr-0"></i>
+                <span class="ml-1">Image History</span>
               </button>
 
               <!-- Settings Button (Icon-Only with upgraded mechanical cogwheel SVG) -->
@@ -1251,6 +1254,9 @@ import '../css/styles.css';
             <button id="btn-refresh-tree" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition cursor-pointer" title="Refresh Tree">
               <i class="fa-solid fa-arrows-rotate text-xs"></i>
             </button>
+            <button id="btn-download-workspace-zip" class="p-1 dark:hover:text-blue-400 hover:text-blue-600 text-blue-500 rounded transition cursor-pointer" title="Download Workspace (.zip)">
+              <i class="fa-solid fa-file-zipper text-xs"></i>
+            </button>
             <button id="btn-clear-tree" class="p-1 dark:hover:text-red-400 hover:text-red-600 text-slate-400 rounded transition cursor-pointer" title="Clear Workspace">
               <i class="fa-solid fa-eraser text-xs"></i>
             </button>
@@ -1331,9 +1337,11 @@ import '../css/styles.css';
       const isActive = state.activeTabPath === node.path;
       const ext = node.name.split('.').pop()?.toLowerCase();
       const imgExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico'];
+      const audioExts = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus', 'webm'];
       let icon = 'fa-file text-slate-400';
       if (node.name.toLowerCase().includes('dockerfile')) icon = 'fa-docker text-blue-500';
       else if (ext && imgExts.includes(ext)) icon = 'fa-file-image text-purple-400';
+      else if (ext && audioExts.includes(ext)) icon = 'fa-file-audio text-pink-400';
       else if (ext === 'py') icon = 'fa-brands fa-python text-amber-500';
       else if (ext === 'js' || ext === 'jsx') icon = 'fa-brands fa-square-js text-yellow-500';
       else if (ext === 'json') icon = 'fa-code text-emerald-500';
@@ -1404,7 +1412,57 @@ import '../css/styles.css';
 
     const ext = (activeTab.name.split('.').pop() || '').toLowerCase();
     const imgExts = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico'];
+    const audioExts = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac', 'opus', 'webm'];
     const isImage = activeTab.isImage || imgExts.includes(ext);
+    const isAudio = activeTab.isAudio || audioExts.includes(ext);
+
+    if (isAudio) {
+      const fileFormat = (activeTab.format || ext).toUpperCase();
+      const fileName = activeTab.name;
+      const audioSrc = activeTab.content && activeTab.content.startsWith('data:') 
+        ? activeTab.content 
+        : `/api/workspace/files/raw/${encodeURIComponent(activeTab.path)}`;
+
+      return `
+        <div class="flex-1 flex flex-col w-full h-full min-h-0 dark:bg-slate-950 bg-white select-none">
+          <!-- Top Toolbar for Audio Preview -->
+          <div class="h-10 dark:bg-slate-900/90 bg-slate-100 px-4 border-b dark:border-slate-800 border-slate-200 flex items-center justify-between text-xs dark:text-slate-400 text-slate-600 shrink-0">
+            <div class="flex items-center space-x-2 font-mono truncate max-w-[50%]">
+              <i class="fa-solid fa-file-audio text-pink-400 text-sm"></i>
+              <span class="truncate font-medium dark:text-slate-200 text-slate-800">${escapeHtml(activeTab.path)}</span>
+            </div>
+            
+            <div class="flex items-center space-x-3 shrink-0">
+              <span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-pink-500/10 text-pink-400 border border-pink-500/20 uppercase">
+                ${escapeHtml(fileFormat)} AUDIO
+              </span>
+
+              <button id="btn-toggle-editor-max" class="p-1 dark:hover:text-white hover:text-slate-900 rounded transition flex items-center justify-center text-slate-400 hover:text-slate-200" title="${state.editorMaximized ? 'Restore View' : 'Maximize Preview'}">
+                <i class="fa-solid ${state.editorMaximized ? 'fa-compress' : 'fa-expand'} text-xs"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Centered Media Preview Container -->
+          <div class="w-full h-full flex-1 relative flex flex-col items-center justify-center p-6 overflow-auto dark:bg-slate-950 bg-slate-100 min-h-0">
+            <div class="w-full max-w-lg p-8 rounded-2xl dark:bg-slate-900 bg-white shadow-2xl border dark:border-slate-800 border-slate-300 flex flex-col items-center justify-center space-y-6">
+              <div class="w-20 h-20 rounded-full bg-pink-500/10 border border-pink-500/30 flex items-center justify-center text-pink-400 text-3xl shadow-lg animate-pulse">
+                <i class="fa-solid fa-music"></i>
+              </div>
+              <div class="text-center w-full px-2">
+                <h4 class="text-base font-bold dark:text-white text-slate-900 truncate max-w-full">${escapeHtml(fileName)}</h4>
+                <p class="text-xs dark:text-slate-400 text-slate-500 font-mono mt-1 truncate max-w-full">${escapeHtml(activeTab.path)}</p>
+              </div>
+              <audio controls controlsList="nodownload" class="w-full h-12 rounded-lg shadow-inner outline-none" src="${audioSrc}"></audio>
+              <div class="text-[11px] text-slate-400 font-mono flex items-center space-x-2">
+                <i class="fa-solid fa-circle-info text-pink-400"></i>
+                <span>HTML5 Audio Player • ${escapeHtml(fileFormat)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
 
     if (isImage) {
       const fileFormat = (activeTab.format || ext).toUpperCase();
@@ -1582,6 +1640,48 @@ import '../css/styles.css';
         <div class="flex-1 relative min-h-0 h-full w-full overflow-hidden bg-slate-950">
           <pre id="terminal-logs-body" class="absolute inset-0 p-4 overflow-y-auto font-mono text-xs text-emerald-400 whitespace-pre-wrap leading-relaxed select-text webkit-overflow-scrolling-touch min-h-0 max-h-full">${escapeHtml(state.activeJobLogs || 'Ready. Click "Image Build" to compile image and stream logs.')}<div id="terminal-scroll-anchor" class="h-0 w-0"></div></pre>
         </div>
+      </div>
+    `;
+  }
+
+  function renderContextMenu() {
+    if (!state.contextMenu || !state.contextMenu.visible) return '';
+    const { x, y, path: ctxPath, name: ctxName, isFolder } = state.contextMenu;
+    const hasClipboard = !!state.clipboard;
+
+    return `
+      <div id="workspace-context-menu"
+           class="fixed z-[9999] w-52 dark:bg-slate-900 bg-white border dark:border-slate-700 border-slate-300 rounded-xl shadow-2xl py-1.5 text-xs text-slate-800 dark:text-slate-200 select-none animate-in fade-in zoom-in-95 duration-100"
+           style="top: ${y}px; left: ${x}px;">
+        <div class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b dark:border-slate-800 border-slate-200 truncate max-w-full flex items-center space-x-1">
+          <i class="fa-solid ${isFolder ? 'fa-folder text-amber-400' : (ctxPath ? 'fa-file text-blue-400' : 'fa-folder-tree text-slate-400')} text-xs"></i>
+          <span class="truncate">${escapeHtml(ctxName || 'Workspace Root')}</span>
+        </div>
+        ${ctxPath ? `
+          <button id="ctx-download" class="w-full text-left px-3 py-2 dark:hover:bg-slate-800 hover:bg-slate-100 flex items-center space-x-2.5 cursor-pointer text-slate-700 dark:text-slate-200">
+            <i class="fa-solid ${isFolder ? 'fa-file-zipper text-purple-400' : 'fa-download text-blue-400'} w-4"></i>
+            <span>Download ${isFolder ? 'Folder (.zip)' : 'File'}</span>
+          </button>
+          <button id="ctx-rename" class="w-full text-left px-3 py-2 dark:hover:bg-slate-800 hover:bg-slate-100 flex items-center space-x-2.5 cursor-pointer text-slate-700 dark:text-slate-200">
+            <i class="fa-solid fa-pen-to-square text-amber-400 w-4"></i>
+            <span>Rename</span>
+          </button>
+          <button id="ctx-copy" class="w-full text-left px-3 py-2 dark:hover:bg-slate-800 hover:bg-slate-100 flex items-center space-x-2.5 cursor-pointer text-slate-700 dark:text-slate-200">
+            <i class="fa-solid fa-copy text-indigo-400 w-4"></i>
+            <span>Copy</span>
+          </button>
+        ` : ''}
+        <button id="ctx-paste" class="w-full text-left px-3 py-2 flex items-center space-x-2.5 ${hasClipboard ? 'dark:hover:bg-slate-800 hover:bg-slate-100 cursor-pointer text-slate-700 dark:text-slate-200' : 'opacity-40 cursor-not-allowed text-slate-400'}" ${hasClipboard ? '' : 'disabled'}>
+          <i class="fa-solid fa-paste text-emerald-400 w-4"></i>
+          <span>Paste ${hasClipboard ? `(${escapeHtml(state.clipboard.name)})` : ''}</span>
+        </button>
+        ${ctxPath ? `
+          <div class="my-1 border-t dark:border-slate-800 border-slate-200"></div>
+          <button id="ctx-delete" class="w-full text-left px-3 py-2 dark:hover:bg-slate-800 hover:bg-slate-100 flex items-center space-x-2.5 text-red-500 dark:text-red-400 cursor-pointer">
+            <i class="fa-solid fa-trash-can w-4"></i>
+            <span>Delete</span>
+          </button>
+        ` : ''}
       </div>
     `;
   }
@@ -2176,7 +2276,7 @@ import '../css/styles.css';
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-lg font-bold dark:text-white text-slate-900 flex items-center space-x-2">
               <i class="fa-solid fa-boxes-stacked text-purple-500"></i>
-              <span>Image Repository & Build History</span>
+              <span>Image History</span>
             </h3>
             <button class="btn-close-modal dark:text-slate-400 text-slate-500 hover:dark:text-white hover:text-slate-900"><i class="fa-solid fa-xmark"></i></button>
           </div>
@@ -2187,13 +2287,15 @@ import '../css/styles.css';
                   <th class="py-2.5 px-3">IMAGE / TARGET</th>
                   <th class="py-2.5 px-3 font-mono">IMAGE ID</th>
                   <th class="py-2.5 px-3">BUILD</th>
+                  <th class="py-2.5 px-3">BUILD LOG</th>
                   <th class="py-2.5 px-3">PUSH</th>
+                  <th class="py-2.5 px-3">PUSH LOG</th>
                   <th class="py-2.5 px-3">CREATED</th>
                   <th class="py-2.5 px-3 text-right">ACTIONS</th>
                 </tr>
               </thead>
               <tbody class="divide-y dark:divide-slate-800/50 divide-slate-200">
-                ${state.jobs.length === 0 ? `<tr><td colspan="6" class="py-4 text-center dark:text-slate-500 text-slate-400">No container images recorded yet.</td></tr>` : ''}
+                ${state.jobs.length === 0 ? `<tr><td colspan="8" class="py-4 text-center dark:text-slate-500 text-slate-400">No container images recorded yet.</td></tr>` : ''}
                 ${state.jobs.map(j => {
                   const targetTag = j.target_tag || `${j.image_name || 'dockforge'}:${j.tag || 'latest'}`;
                   const imgId = j.image_id || j.id || '-';
@@ -2208,19 +2310,34 @@ import '../css/styles.css';
                       <td class="py-2.5 px-3 font-medium dark:text-white text-slate-900 select-all">${escapeHtml(targetTag)}</td>
                       <td class="py-2.5 px-3 font-mono dark:text-slate-300 text-slate-600 select-all" title="${escapeHtml(imgId)}">${escapeHtml(displayImgId)}</td>
                       <td class="py-2.5 px-3">${getBuildStatusPill(buildStatus)}</td>
-                      <td class="py-2.5 px-3">${getPushStatusPill(pushStatus)}</td>
-                      <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500 whitespace-nowrap">${escapeHtml(createdTime)}</td>
-                      <td class="py-2.5 px-3 text-right space-x-1.5">
-                        <button class="btn-view-job-logs px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded transition" data-job-id="${escapeHtml(imgId)}">
-                          View Log
+                      <td class="py-2.5 px-3 whitespace-nowrap">
+                        <button class="btn-view-build-log px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded transition cursor-pointer inline-flex items-center" data-job-id="${escapeHtml(imgId)}" title="View Build Log">
+                          <i class="fa-solid fa-file-lines mr-1.5 text-blue-400"></i>Build Log
                         </button>
+                      </td>
+                      <td class="py-2.5 px-3">${getPushStatusPill(pushStatus)}</td>
+                      <td class="py-2.5 px-3 whitespace-nowrap">
+                        ${((pushStatus !== null && pushStatus !== undefined) || j.push_log) ? `
+                          <button class="btn-view-push-log px-2.5 py-1 text-xs dark:bg-slate-800 bg-slate-100 hover:dark:bg-slate-700 hover:bg-slate-200 dark:text-slate-200 text-slate-700 rounded transition cursor-pointer inline-flex items-center" data-job-id="${escapeHtml(imgId)}" title="View Push Log">
+                            <i class="fa-solid fa-file-lines mr-1.5 text-amber-500"></i>Push Log
+                          </button>
+                        ` : `<span class="text-slate-400 dark:text-slate-500 font-mono">-</span>`}
+                      </td>
+                      <td class="py-2.5 px-3 dark:text-slate-400 text-slate-500 whitespace-nowrap">${escapeHtml(createdTime)}</td>
+                      <td class="py-2.5 px-3 text-right space-x-1.5 whitespace-nowrap">
                         ${isBuildSuccess ? `
-                          <button class="btn-push-history-image px-2.5 py-1 text-xs bg-amber-600 hover:bg-amber-500 text-white rounded shadow-sm transition" data-target-tag="${escapeHtml(targetTag)}" data-image-id="${escapeHtml(imgId)}">
-                            <i class="fa-solid fa-cloud-arrow-up mr-1"></i>Push
+                          <button class="btn-push-history-image h-7 w-7 inline-flex items-center justify-center text-xs bg-amber-600 hover:bg-amber-500 text-white rounded shadow-2xs transition cursor-pointer" data-target-tag="${escapeHtml(targetTag)}" data-image-id="${escapeHtml(imgId)}" title="push to dockerhub">
+                            <i class="fa-solid fa-cloud-arrow-up text-[13px]"></i>
+                          </button>
+                          <button class="btn-download-history-image h-7 w-7 inline-flex items-center justify-center text-xs bg-blue-600 hover:bg-blue-500 text-white rounded shadow-2xs transition cursor-pointer" data-image-id="${escapeHtml(imgId)}" data-target-tag="${escapeHtml(targetTag)}" title="Download image (.tar)">
+                            <i class="fa-solid fa-download text-[13px]"></i>
                           </button>
                         ` : `
-                          <button disabled class="px-2.5 py-1 text-xs dark:bg-slate-800/50 bg-slate-100 dark:text-slate-600 text-slate-400 rounded cursor-not-allowed">
-                            Push
+                          <button disabled class="h-7 w-7 inline-flex items-center justify-center text-xs dark:bg-slate-800/50 bg-slate-100 dark:text-slate-600 text-slate-400 rounded cursor-not-allowed" title="push to dockerhub">
+                            <i class="fa-solid fa-cloud-arrow-up text-[13px]"></i>
+                          </button>
+                          <button disabled class="h-7 w-7 inline-flex items-center justify-center text-xs dark:bg-slate-800/50 bg-slate-100 dark:text-slate-600 text-slate-400 rounded cursor-not-allowed" title="Download image (.tar)">
+                            <i class="fa-solid fa-download text-[13px]"></i>
                           </button>
                         `}
                       </td>
@@ -2847,6 +2964,107 @@ import '../css/styles.css';
     });
   }
 
+  function downloadWorkspaceZip() {
+    showToast('Preparing full workspace ZIP archive...');
+    const link = document.createElement('a');
+    link.href = '/api/workspace/download-zip';
+    link.download = 'workspace.zip';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  function downloadWorkspaceItem(path, isFolder, name) {
+    if (!path) {
+      downloadWorkspaceZip();
+      return;
+    }
+    const link = document.createElement('a');
+    if (isFolder) {
+      showToast(`Preparing folder ZIP archive '${name}.zip'...`);
+      link.href = `/api/workspace/download-folder?path=${encodeURIComponent(path)}`;
+      link.download = `${name}.zip`;
+    } else {
+      showToast(`Downloading '${name}'...`);
+      link.href = `/api/workspace/files/raw/${encodeURIComponent(path)}`;
+      link.download = name;
+    }
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  async function renameWorkspaceItem(oldPath, name) {
+    if (!oldPath) return;
+    const newName = prompt(`Enter new name for "${name}":`, name);
+    if (!newName || newName.trim() === '' || newName.trim() === name) return;
+
+    const trimmedNewName = newName.trim();
+    const parentDir = oldPath.includes('/') ? oldPath.substring(0, oldPath.lastIndexOf('/')) : '';
+    const newPath = parentDir ? `${parentDir}/${trimmedNewName}` : trimmedNewName;
+
+    try {
+      const res = await apiFetch('/api/workspace/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_path: oldPath, new_path: newPath })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(data.message || `Renamed '${name}' to '${trimmedNewName}'`);
+        state.openTabs.forEach(tab => {
+          if (tab.path === oldPath) {
+            tab.path = newPath;
+            tab.name = trimmedNewName;
+          } else if (tab.path.startsWith(oldPath + '/')) {
+            tab.path = newPath + tab.path.slice(oldPath.length);
+          }
+        });
+        if (state.activeTabPath === oldPath) {
+          state.activeTabPath = newPath;
+        } else if (state.activeTabPath && state.activeTabPath.startsWith(oldPath + '/')) {
+          state.activeTabPath = newPath + state.activeTabPath.slice(oldPath.length);
+        }
+        await loadWorkspaceTree(false);
+      } else {
+        showToast(data.detail || 'Rename failed', true);
+      }
+    } catch (err) {
+      showToast(`Error renaming: ${err.message}`, true);
+    }
+  }
+
+  function copyWorkspaceItem(path, isFolder, name) {
+    if (!path) return;
+    state.clipboard = { srcPath: path, isFolder, name };
+    showToast(`Copied '${name}' to clipboard`);
+    render();
+  }
+
+  async function pasteWorkspaceItem(targetPath, isFolder) {
+    if (!state.clipboard) {
+      showToast('Clipboard is empty', true);
+      return;
+    }
+    const destDir = isFolder ? targetPath : (targetPath.includes('/') ? targetPath.substring(0, targetPath.lastIndexOf('/')) : '');
+    try {
+      const res = await apiFetch('/api/workspace/copy-paste', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ src_path: state.clipboard.srcPath, dest_dir: destDir })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(data.message || `Pasted '${state.clipboard.name}'`);
+        await loadWorkspaceTree(false);
+      } else {
+        showToast(data.detail || 'Paste failed', true);
+      }
+    } catch (err) {
+      showToast(`Error pasting: ${err.message}`, true);
+    }
+  }
+
   function attachEvents() {
     // Header Desktop & Mobile Buttons
     const handlePullClick = () => {
@@ -3061,9 +3279,92 @@ import '../css/styles.css';
       render();
     });
     document.getElementById('btn-refresh-tree')?.addEventListener('click', () => loadWorkspaceTree(true));
+    document.getElementById('btn-download-workspace-zip')?.addEventListener('click', downloadWorkspaceZip);
     document.getElementById('btn-clear-tree')?.addEventListener('click', () => {
       state.modals.clearWorkspace = true;
       render();
+    });
+
+    // Workspace Items Right-Click Context Menu Listeners
+    const hideContextMenu = () => {
+      if (state.contextMenu && state.contextMenu.visible) {
+        state.contextMenu.visible = false;
+        render();
+      }
+    };
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#workspace-context-menu')) {
+        hideContextMenu();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideContextMenu();
+    });
+
+    document.querySelectorAll('.tree-node').forEach(nodeEl => {
+      nodeEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const path = nodeEl.getAttribute('data-folder-path') || nodeEl.getAttribute('data-file-path') || '';
+        const name = nodeEl.getAttribute('data-node-name') || path.split('/').pop() || '';
+        const isFolder = nodeEl.getAttribute('data-is-folder') === 'true';
+
+        const mouseX = Math.min(e.clientX, window.innerWidth - 220);
+        const mouseY = Math.min(e.clientY, window.innerHeight - 220);
+
+        state.contextMenu = { visible: true, x: mouseX, y: mouseY, path, name, isFolder };
+        render();
+      });
+    });
+
+    const treeContainerEl = document.getElementById('workspace-tree-container');
+    if (treeContainerEl) {
+      treeContainerEl.addEventListener('contextmenu', (e) => {
+        if (e.target.closest('.tree-node')) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const mouseX = Math.min(e.clientX, window.innerWidth - 220);
+        const mouseY = Math.min(e.clientY, window.innerHeight - 220);
+
+        state.contextMenu = { visible: true, x: mouseX, y: mouseY, path: '', name: 'Workspace Root', isFolder: true };
+        render();
+      });
+    }
+
+    document.getElementById('ctx-download')?.addEventListener('click', () => {
+      const { path, isFolder, name } = state.contextMenu;
+      hideContextMenu();
+      downloadWorkspaceItem(path, isFolder, name);
+    });
+
+    document.getElementById('ctx-rename')?.addEventListener('click', () => {
+      const { path, name } = state.contextMenu;
+      hideContextMenu();
+      renameWorkspaceItem(path, name);
+    });
+
+    document.getElementById('ctx-copy')?.addEventListener('click', () => {
+      const { path, isFolder, name } = state.contextMenu;
+      hideContextMenu();
+      copyWorkspaceItem(path, isFolder, name);
+    });
+
+    document.getElementById('ctx-paste')?.addEventListener('click', () => {
+      const { path, isFolder } = state.contextMenu;
+      hideContextMenu();
+      pasteWorkspaceItem(path, isFolder);
+    });
+
+    document.getElementById('ctx-delete')?.addEventListener('click', () => {
+      const { path, isFolder } = state.contextMenu;
+      hideContextMenu();
+      if (path) {
+        state.modals.deleteItem = { path, isFolder };
+        render();
+      }
     });
 
     // File Tree clicks
@@ -3678,6 +3979,72 @@ import '../css/styles.css';
       } catch (err) {
         showToast(`Error: ${err.message}`, true);
       }
+    });
+
+    document.querySelectorAll('.btn-view-build-log').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const jobId = btn.getAttribute('data-job-id');
+        try {
+          const res = await apiFetch(`/api/jobs/${jobId}/logs?type=build`);
+          if (res.ok) {
+            const data = await res.json();
+            state.activeJobLogs = data.logs;
+            state.terminalAutoScroll = true;
+            state.terminalScrollTop = null;
+            state.modals.jobs = false;
+            render();
+          }
+        } catch (e) {
+          showToast(`Error fetching build log: ${e.message}`, true);
+        }
+      });
+    });
+
+    document.querySelectorAll('.btn-view-push-log').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const jobId = btn.getAttribute('data-job-id');
+        try {
+          const res = await apiFetch(`/api/jobs/${jobId}/logs?type=push`);
+          if (res.ok) {
+            const data = await res.json();
+            state.activeJobLogs = data.logs;
+            state.terminalAutoScroll = true;
+            state.terminalScrollTop = null;
+            state.modals.jobs = false;
+            render();
+          }
+        } catch (e) {
+          showToast(`Error fetching push log: ${e.message}`, true);
+        }
+      });
+    });
+
+    document.querySelectorAll('.btn-download-history-image').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const imageId = btn.getAttribute('data-image-id');
+        const targetTag = btn.getAttribute('data-target-tag') || imageId;
+        try {
+          showToast(`Preparing download for ${targetTag}...`);
+          const res = await apiFetch(`/api/images/download/${encodeURIComponent(imageId)}`);
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Download failed' }));
+            showToast(err.detail || 'Failed to download image archive', true);
+            return;
+          }
+          const blob = await res.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${imageId}.tar`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          window.URL.revokeObjectURL(url);
+          showToast(`Downloaded ${imageId}.tar successfully!`);
+        } catch (err) {
+          showToast(`Download error: ${err.message}`, true);
+        }
+      });
     });
 
     document.querySelectorAll('.btn-view-job-logs').forEach(btn => {
