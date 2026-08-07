@@ -51,6 +51,8 @@ def format_authed_github_url(url: str, token: Optional[str] = None) -> str:
     return clean_url
 
 class GitService:
+    WORKSPACE_DIR = WORKSPACE_DIR
+
     @staticmethod
     def pull_repository(repo_url: str, branch: str = "main", github_token: Optional[str] = None) -> Dict[str, Any]:
         """Pull or clone a Git repository into the workspace directory, ensuring workspace is cleanly wiped first."""
